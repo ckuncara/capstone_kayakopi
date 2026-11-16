@@ -51,7 +51,9 @@ class SpendTracker:
             f.write(json.dumps(asdict(e)) + "\n")
         return e
 
-    def totals(self) -> dict:
+    def totals(self, thread_id: str | None = None) -> dict:
+        # FIX 2: optional thread_id filter so the UI can answer 'how much did
+        # THIS conversation cost?' on demand (smell #4).
         total_calls = 0
         total_cost = 0.0
         total_in = 0
@@ -66,6 +68,8 @@ class SpendTracker:
                 try:
                     r = json.loads(line)
                 except json.JSONDecodeError:
+                    continue
+                if thread_id is not None and r.get("thread_id", "") != thread_id:
                     continue
                 total_calls += 1
                 total_cost += r.get("estimated_cost_usd", 0.0)

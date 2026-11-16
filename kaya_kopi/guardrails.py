@@ -63,7 +63,13 @@ def sanitize_output(text: str) -> str:
 
 HONEST_UNKNOWN_MARKERS = [
     "not available", "no data", "cannot determine", "insufficient data",
-    "don't have", "not in", "unable to answer", "no information",
+    "don't have", "don\u2019t have", "not in", "unable to answer", "no information",
+    # widened so honest refusals in any common phrasing are recognized
+    "cannot answer", "can\u2019t answer", "could not answer", "could\u2019t answer",
+    "can't find", "could not find", "not sure", "no matching", "no record",
+    "not in the data", "no matching record", "not present", "not found",
+    "won\u2019t guess", "will not guess", "won't guess", "beyond my knowledge",
+    "outside my scope", "not something i can", "not provided",
 ]
 
 
