@@ -38,3 +38,4 @@ Briefing Mon 16 Nov (Zoom) · Checkpoint 1 Thu 19 Nov · Checkpoint 2 Mon 23 Nov
 
 ## Real commit
 - Chandra
+- Andri
