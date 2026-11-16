@@ -1,0 +1,5 @@
+# Client data never enters git — only the two markdown deliverables are tracked.
+*
+!README.md
+!DATA_AUDIT.md
+!.gitignore

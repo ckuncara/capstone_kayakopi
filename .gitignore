@@ -1,23 +1,22 @@
-# ---- never commit these ----
-# client data (download from NTULearn, unzip into data/)
-data/*
-!data/README.md
-
-# secrets
+# secrets / local credentials
 .env
-*.pem
+*.env
 
-# local artifacts
-*.db
-*.sqlite*
-faiss_*/
+# python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
 venv/
-.ipynb_checkpoints/
-.DS_Store
 
-# spend tracking + eval output
+# langgraph checkpoints & runtime artifacts
+*.sqlite*
 spend_trace.jsonl
 evals_report.json
+
+# client data (tracked deliverables re-allowed by data/.gitignore)
+data/sql/
+data/tabular/
+data/images/
+data/docs/
+data/CLIENT_BRIEF.md
+data/BRIEFING_team1_kaya_kopi.pdf
