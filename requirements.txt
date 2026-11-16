@@ -1,0 +1,22 @@
+# LangGraph: Streamlit & Agents - Module 5 dependencies
+# Core LangGraph + LangChain
+langgraph>=0.2.0
+langgraph-checkpoint-sqlite>=2.0.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+# Structured output and validation
+pydantic>=2.0.0
+typing-extensions>=4.8.0
+# Streamlit (UI for chatbots)
+streamlit>=1.30.0
+# RAG (NB 05)
+faiss-cpu>=1.7.4
+pypdf>=4.0.0
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+# Capstone: MySQL driver
+pymysql>=1.1.0
