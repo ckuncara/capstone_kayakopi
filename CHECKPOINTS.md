@@ -2,13 +2,13 @@
 
 Tick items as your team completes them; the instructor reviews this file at each due date.
 
-## Checkpoint 1 — due Thu 19 Nov 2026, 09:00 (reviewed at Consult 1, 10:00 on Zoom)
-- [ ] Data audit complete: every file in `data/` opened, row/page counts recorded
-- [ ] ER diagram of the CLEANED schema (Mermaid, in `docs/`)
-- [ ] Trap list: every data-quality problem found so far, with evidence
-- [ ] Package checked against the brief: anything the brief mentions that is NOT in the package has been raised with the client by email, and the answer recorded in `docs/client_qa.md`
-- [ ] Architecture proposal (Mermaid, in `docs/`)
-- [ ] Everyone has committed at least once
+## Checkpoint 1 — due Fri 20 Nov 2026, 17:00 (repo only; written feedback after deadline — per Leonard's email 16 Nov)
+- [x] Data audit complete: every file in `data/` opened, row/page counts recorded → `data/DATA_AUDIT.md`
+- [x] ER diagram of the CLEANED schema (Mermaid, in `docs/`) → `docs/er_diagram.md`
+- [x] Trap list: every data-quality problem found so far, with evidence → `docs/data_quality_traps.md` (11 traps, each with evidence)
+- [ ] Package checked against the brief: anything the brief mentions that is NOT in the package has been raised with the client by email, and the answer recorded in `docs/client_qa.md` → questions drafted (`docs/client_email_draft.md`); **email pending send**
+- [x] Architecture proposal (Mermaid, in `docs/`) → `docs/architecture.md`
+- [ ] Everyone has committed at least once → **blocked: Mikey's repo access not yet granted**
 
 ## Checkpoint 2 — due Mon 23 Nov 2026, 09:00 (reviewed at Consult 3, 13:00 on Zoom)
 - [ ] Ingestion + retrieval working end-to-end on at least 2 source types (one must be images)
