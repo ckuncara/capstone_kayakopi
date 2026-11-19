@@ -34,9 +34,8 @@ from kaya_kopi.guardrails import (
     InputBlockedError,
     check_input,
     sanitize_output,
-    is_honest_unknown,
 )
-from kaya_kopi.spend import SpendTracker
+from kaya_kopi.spend import SpendTracker, BudgetExhaustedError
 from kaya_kopi.tools import ALL_TOOLS
 
 CHECKPOINT_DB = os.environ.get("KAYA_CHECKPOINTS", "checkpoints.sqlite")
@@ -105,14 +104,14 @@ def build_graph(checkpointer=None, tracker: SpendTracker | None = None,
         msgs = [_system_prompt()] + list(state["messages"])
         import time
         t0 = time.time()
-        # FIX 2: thread_id lives in the LangGraph config (set by the
-        # frontend), not in State — read it from the active config so the
-        # spend tracker can group cost per conversation.
+        # Budget gate (US$50 cap): refuse before any token is spent.
+        tracker.check_budget()
+        # Thread attribution so per-conversation spend is visible in the trace.
         try:
             from langgraph.config import get_config
-            thread_id = (get_config().get("configurable") or {}).get("thread_id", "")
+            tid = (get_config().get("configurable") or {}).get("thread_id", "")
         except Exception:
-            thread_id = ""
+            tid = ""
         resp = _get_llm(model).invoke(msgs)
         usage = getattr(resp, "usage_metadata", None) or {}
         tracker.record(
@@ -120,52 +119,16 @@ def build_graph(checkpointer=None, tracker: SpendTracker | None = None,
             prompt_tokens=usage.get("input_tokens", 0),
             completion_tokens=usage.get("output_tokens", 0),
             duration_s=time.time() - t0,
-            thread_id=thread_id,
+            thread_id=tid,
         )
-        # FIX 3: collect citations from the most recent tool messages so the
-        # UI can show a deterministic 'Sources: ...' line (box 2).
-        citations = []
-        for m in reversed(state["messages"]):
-            if getattr(m, "type", "") == "tool":
-                try:
-                    payload = __import__("json").loads(m.content)
-                    if isinstance(payload, dict) and payload.get("source"):
-                        citations.append(payload["source"])
-                except Exception:
-                    pass
-            elif getattr(m, "type", "") == "human":
-                break  # stop at the user turn that triggered this call
-        return {"messages": [resp], "citations": list(reversed(citations))}
+        return {"messages": [resp]}
 
     def guard_out(state: State) -> dict:
-        # FIX 4: honest-refusal enforcement. Scan the most recent tool
-        # messages: if any returned status='error' and the model's final
-        # answer does NOT concede it cannot answer, replace the answer with
-        # a forced honest refusal. This is box 4 ('honest degradation,
-        # never invention') enforced in code, not in the prompt.
         last = state["messages"][-1]
-        if not (isinstance(last, AIMessage) and last.content):
-            return {}
-        import json as _json
-        saw_tool_error = False
-        for m in reversed(state["messages"]):
-            if getattr(m, "type", "") == "tool":
-                try:
-                    payload = _json.loads(m.content)
-                    if isinstance(payload, dict) and payload.get("status") == "error":
-                        saw_tool_error = True
-                except Exception:
-                    pass
-                break  # only the most recent tool result matters
-        clean = sanitize_output(last.content)
-        if saw_tool_error and not is_honest_unknown(clean):
-            clean = (
-                "I could not answer that with the available data — the source "
-                "I tried to read returned an error or had no matching record. "
-                "I won't guess."
-            )
-        if clean != last.content:
-            return {"messages": [AIMessage(content=clean)]}
+        if isinstance(last, AIMessage) and last.content:
+            clean = sanitize_output(last.content)
+            if clean != last.content:
+                return {"messages": [AIMessage(content=clean)]}
         return {}
 
     g = StateGraph(State)

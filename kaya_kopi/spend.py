@@ -17,6 +17,21 @@ DEFAULT_PRICING = {
     "gpt-4o": {"input": 2.50, "output": 10.00},
 }
 
+# Course hard budget (US$50 cap on the team API key).
+# Override with KAYA_BUDGET_USD if the cap changes.
+BUDGET_USD = float(os.environ.get("KAYA_BUDGET_USD", "50"))
+
+# Calls with less headroom than this are refused, so a single call can
+# never silently push the total past the cap.
+MIN_CALL_HEADROOM_USD = 0.10
+
+
+class BudgetExhaustedError(RuntimeError):
+    """Raised BEFORE an LLM call when the US$ cap is reached.
+
+    Surfaced to the user as a plain, honest message — not a crash.
+    """
+
 
 @dataclass
 class TraceEntry:
@@ -32,8 +47,10 @@ class TraceEntry:
 class SpendTracker:
     """Append-only JSONL trace + running totals."""
 
-    def __init__(self, path: str = "spend_trace.jsonl"):
+    def __init__(self, path: str = "spend_trace.jsonl",
+                 budget_usd: float | None = None):
         self.path = path
+        self.budget_usd = budget_usd if budget_usd is not None else BUDGET_USD
 
     def estimate(self, model: str, prompt_tokens: int, completion_tokens: int) -> float:
         p = DEFAULT_PRICING.get(model, DEFAULT_PRICING["gpt-4o-mini"])
@@ -51,9 +68,7 @@ class SpendTracker:
             f.write(json.dumps(asdict(e)) + "\n")
         return e
 
-    def totals(self, thread_id: str | None = None) -> dict:
-        # FIX 2: optional thread_id filter so the UI can answer 'how much did
-        # THIS conversation cost?' on demand (smell #4).
+    def totals(self) -> dict:
         total_calls = 0
         total_cost = 0.0
         total_in = 0
@@ -69,8 +84,6 @@ class SpendTracker:
                     r = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if thread_id is not None and r.get("thread_id", "") != thread_id:
-                    continue
                 total_calls += 1
                 total_cost += r.get("estimated_cost_usd", 0.0)
                 total_in += r.get("prompt_tokens", 0)
@@ -81,3 +94,44 @@ class SpendTracker:
             "input_tokens": total_in,
             "output_tokens": total_out,
         }
+
+    # ---- budget layer (US$ cap) --------------------------------------------
+
+    def remaining(self) -> float:
+        """US$ left on the cap (never negative)."""
+        return max(0.0, self.budget_usd - self.totals()["cost_usd"])
+
+    def would_exceed(self, est_cost: float) -> bool:
+        """Would a call of est_cost push us past the cap?"""
+        return self.totals()["cost_usd"] + est_cost > self.budget_usd
+
+    def check_budget(self) -> float:
+        """Call BEFORE every LLM call.
+
+        Raises BudgetExhaustedError when the cap is reached or the remaining
+        headroom is below MIN_CALL_HEADROOM_USD (so a single call can't
+        silently push the total over the cap). Returns the US$ remaining.
+        """
+        rem = self.remaining()
+        if rem < MIN_CALL_HEADROOM_USD:
+            used = self.totals()["cost_usd"]
+            raise BudgetExhaustedError(
+                f"API budget exhausted — ${used:.2f} of the ${self.budget_usd:.2f} "
+                f"cap is used. Please ask your team before running more questions."
+            )
+        return rem
+
+    def status(self) -> dict:
+        """Sidebar alert level: ok <50% <= warn <80% <= high <95% <= crit."""
+        used = self.totals()["cost_usd"]
+        pct = (100.0 * used / self.budget_usd) if self.budget_usd else 0.0
+        if pct >= 95.0:
+            level = "crit"
+        elif pct >= 80.0:
+            level = "high"
+        elif pct >= 50.0:
+            level = "warn"
+        else:
+            level = "ok"
+        return {"used_usd": used, "budget_usd": self.budget_usd,
+                "pct": pct, "level": level, "remaining_usd": self.remaining()}

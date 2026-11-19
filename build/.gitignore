@@ -1,0 +1,3 @@
+# derived client invoice data — keep local, never commit (team convention: client data stays out of git)
+out/*.csv
+out/*.json

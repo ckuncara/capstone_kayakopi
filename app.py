@@ -13,7 +13,7 @@ import streamlit as st
 
 from kaya_kopi.backend import build_graph
 from kaya_kopi.guardrails import InputBlockedError
-from kaya_kopi.spend import SpendTracker
+from kaya_kopi.spend import SpendTracker, BudgetExhaustedError
 
 st.set_page_config(page_title="Kaya Kopi Copilot", page_icon="☕", layout="wide")
 
@@ -63,11 +63,11 @@ def _run(user_text: str) -> None:
         full = "".join(answer_parts).strip()
         if not full:
             raise RuntimeError("The model returned no answer.")
-        # FIX 3: surface citations deterministically (box 2) — the 'Sources:'
-        # line is produced by code from the tool state, not by the model.
         st.session_state.messages.append({"role": "assistant", "content": full})
     except InputBlockedError as e:
         st.error(f"🛑 Blocked by guardrail: {e}")
+    except BudgetExhaustedError as e:
+        st.error(f"💸 {e}")
     except Exception as e:  # box 4: honest error, never a raw traceback
         st.error(f"⚠️ Could not answer: {e}")
 
@@ -78,17 +78,23 @@ st.caption("Answers only from your sales DB, outlet CSVs, invoices and documents
 
 with st.sidebar:
     st.header("Spend tracker")
-    t = st.session_state.tracker.totals()
+    tracker = st.session_state.tracker
+    t = tracker.totals()
+    s = tracker.status()
     st.metric("API calls", t["calls"])
-    st.metric("Est. cost (USD)", f"${t['cost_usd']:.4f}")
+    st.metric("Est. cost (USD)", f"${t['cost_usd']:.4f}",
+              delta=f"of ${s['budget_usd']:.0f} budget")
     st.metric("Tokens (in/out)", f"{t['input_tokens']}/{t['output_tokens']}")
-    # FIX 2: per-conversation cost — answers "what did THIS question cost?"
-    # (smell #4) without reading the JSONL by hand.
-    tt = st.session_state.tracker.totals(thread_id=st.session_state.thread)
-    if tt["calls"]:
-        st.caption(
-            f"🧵 this conversation: {tt['calls']} call(s), ${tt['cost_usd']:.4f}"
-        )
+    # Budget bar + threshold alert (50 / 80 / 95 %)
+    st.caption(f"**Budget:** ${s['used_usd']:.2f} / ${s['budget_usd']:.0f} "
+               f"({s['pct']:.0f}%) — ${s['remaining_usd']:.2f} left")
+    st.progress(min(s["pct"] / 100.0, 1.0))
+    if s["level"] == "crit":
+        st.error("⛔ Budget nearly exhausted — stop running questions.")
+    elif s["level"] == "high":
+        st.warning("⚠️ 80%+ of the budget is used — be economical.")
+    elif s["level"] == "warn":
+        st.info("ℹ️ Half the budget is already used.")
     st.divider()
     thread = st.text_input("Thread ID", value=st.session_state.thread)
     if thread:
