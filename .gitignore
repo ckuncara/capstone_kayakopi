@@ -3,6 +3,9 @@
 data/*
 !data/README.md
 
+# generated ingestion and application runtime artifacts
+runtime/
+
 # secrets
 .env
 *.pem
@@ -17,3 +20,4 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 .DS_Store
+.runtime/
