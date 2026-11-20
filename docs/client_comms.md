@@ -125,3 +125,9 @@ I'll dedupe, send one batch to the client, and log every answer in
 docs/client_comms.md + docs/client_qa.md.
 Don't email the client directly — route through me so we ask once, clearly.
 ```
+
+## Drafted 20 Nov 2026, by Mike (for the existing client email thread)
+
+- Guardrail policy confirmation, Q14–Q23 (see `client_qa.md`), to be sent in the same thread.
+- Framing: safe defaults already in place (read-only, PII redaction, no bulk exports); client answers finalize the policy in code; soft deadline Wed 25 Nov ahead of the 27 Nov demo.
+- Status: **awaiting client reply** (SLA: 2 working days).
