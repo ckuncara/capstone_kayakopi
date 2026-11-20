@@ -32,12 +32,11 @@ Real traps found in the client data package (audited 19 Nov 2026).
 
 ## T4 — ex-GST table vs GST-inclusive paper  (HIGH)
 
-- **What:** `supplier_purchases.gst_treatment = 'ex-GST'` for all 178 rows, but the
-  matching **paper invoices are GST-inclusive** (Subtotal + 9% GST + TOTAL).
+- **What:** `supplier_purchases.gst_treatment` from the purchase table is `ex-GST` for all 178 rows. But the `Subtotal` in the matching paper invoices (before addition of 9% GST) is already higher than `supplier_purchases.total_amount` from the purchase table. **Paper invoices** are listed as **GST-inclusive (Subtotal + 9% GST = TOTAL)**.
 - **Impact:** "Did we pay X?" / cost answers that compare DB amount to paper invoice
-  will be ~9% off or double-count GST.
+  will be ~9% off or double-count GST. As seen in email `2026-06-02_finance_query.txt`, supplier_purchases table totals do not tally with the physical invoices. Prices are not updated with the latest. When comparing between the prices in the table and invoices, it will cause confusion over what is the true cost and expenses, and whether suppliers actually excluded-GST or are quoting the nett cost.
 - **Handling:** Reconcile paper `paper_subtotal` (ex-GST) against the DB row; never
-  compare `paper_total` to an ex-GST figure.
+  compare `paper_total` to an ex-GST figure. Purchase table `supplier_purchases.total_amount` is an ex-GST subtotal calculated based on an old price list. The amount in the paper invoices are based on the latest prices, so they are higher price per unit. **The paper invoices should be the source of truth for supplier costs.** Any costs from the paper invoices that do not add up should be flagged to the client.
 
 ## T5 — Duplicate `invoice_no`  (MED)
 
@@ -49,12 +48,22 @@ Real traps found in the client data package (audited 19 Nov 2026).
   same invoice number and extracted date has subtotal S$1,155.36 and total
   S$1,259.34. Retain both expenses, reconcile using date, supplier location and itemized amounts rather than invoice number alone, and apply verified actual prices as described in T13.
 
-## T6 — Two CSVs use US `MM/DD/YYYY`  (HIGH)
+## T6 — Scanned invoices and eight CSVs, four different date formats  (HIGH)
 
-- **What:** `daily_summary_TPY-02.csv` and `daily_summary_YIS-02.csv` are `MM/DD/YYYY`;
-  the other six are `DD/MM/YYYY`.
-- **Impact:** A single `strptime('%d/%m/%Y')` silently produces wrong dates (or errors)
-  on the two `MM/DD/YYYY` files.
+- **What:**
+
+| CSV files                                                       | Date Format    |
+| --------------------------------------------------------------- | -------------- |
+| `daily_summary_TPY-02.csv` <br />`daily_summary_YIS-02.csv` | `MM/DD/YYYY` |
+| `daily_summary_AMK-01.csv` <br />`daily_summary_JUR-01.csv` | `DD/MM/YYYY` |
+| `daily_summary_AMK-03.csv` <br />`daily_summary_TAM-01.csv` | `YYYY-MM-DD` |
+| `daily_summary_BDK-01.csv` <br />`daily_summary_WDL-01.csv` | `DD-MMM-YY`  |
+
+| Scanned Invoices                   | Date Format    |
+| ---------------------------------- | -------------- |
+| `data\images\supplier_invoices\` | `DD/MM/YYYY` |
+
+- **Impact:** Different date formats may silently produce errors and affect monthly and annual reporting.
 - **Handling:** When comparing DB, we need to use the same date format. We cannot change the managers' files, therefore we should just convert to a cleaned up database with same date formats for uniformity.
 
 ## T7 — Non-uniform CSV headers  (MED)
@@ -62,15 +71,13 @@ Real traps found in the client data package (audited 19 Nov 2026).
 - **What:** 4 different date headers, 4 sales headers, 4 quantity headers across the 8
   files; some files have `Weather`, some `WASTAGE_KG`, some `Remarks`.
 - **Impact:** A hardcoded-column reader breaks on 3+ of the 8 files.
-- **Handling:** Normalise to the CSV headers. Example "number of cups" vs "revenue" or "sales"
+- **Handling:** Normalise to the CSV headers. For example, Total Sales, sales$, REVENUE and Gross Takings are all the day's gross takings with GST included. No of Cups, txns, CUPS and Customer Count are all the number of receipts for the day.
 
-## T8 — Missing days in outlet CSVs  (MED)
+## T8 — Missing dates in outlet CSVs  (MED)
 
-- **What:** Each file is missing 12–21 days inside the 2025-07-01→2026-06-30 window.
-- **Impact:** "Average daily sales" that divides by 365 instead of actual days is wrong;
-  gaps may be closures.
-- **Handling:** Compute averages over *actual* recorded days; surface the gap list to the
-  client rather than filling with zero.
+- **What:** Each CSV file is missing 12–21 days inside the 2025-07-01→2026-06-30 window.
+- **Impact:** "Average daily sales" that divides by 365 instead of actual days is wrong. Stalls open everyday except for two days a year; a missing date means the manager failed to file a report on that day.
+- **Handling:** Compute averages over *actual* recorded days; exclude absent dates from averages and show it as a gap to the client rather than treating it as zero.
 
 ## T9 — Conflicting GST Reg Nos  (LOW)
 
@@ -80,8 +87,7 @@ Real traps found in the client data package (audited 19 Nov 2026).
 - **Handling:** Preserve the GST number and address printed on each invoice.
   Across the 69 scans, there are 69 distinct supplier addresses and 69 distinct
   GST numbers; no address repeats across invoices, so consistency for the same
-  location cannot yet be tested. Confirm whether each location is a separate
-  registered entity rather than assigning one GST number to the whole supplier. Identify suppliers by supplier code instead of the GST number, and list the inconsistent numbers for the client to query the suppliers.
+  location cannot yet be tested. Identify suppliers by supplier code instead of the GST number, and list the inconsistent numbers for the client to query the suppliers.
 
 ## T10 — Staff roster XLSX missing  (MED)
 
@@ -100,7 +106,7 @@ Real traps found in the client data package (audited 19 Nov 2026).
 - **What:** `D'Best Frozen Foods` has an apostrophe; it breaks naive CSV/SQL string
   handling.
 - **Impact:** A string-built query/CSV writer can mis-split the supplier.
-- **Handling:** Use proper escaping; a good test that the tooling isn't string-built. Make sure there is no typo in data input to ensure correct results.
+- **Handling:** Put quotations:`"D'Best Frozen Foods"`. Test that the name survives a CSV write/read and that a parameterized SQL query returns the expected supplier.
 
 ## T12 — Non-itemized `supplier_purchases` records  (HIGH)
 
@@ -159,7 +165,7 @@ Real traps found in the client data package (audited 19 Nov 2026).
 
 ## T17 — Mixed and unresolved hourly-rate formats in the roster  (MED)
 
-- **What:** Pran's section 12 is confirmed in `staff_roster_jun2026.xlsx`,
+- **What:** In `staff_roster_jun2026.xlsx`,
   sheet `Roster Jun 2026`, column K (`Hourly Rate`). Among 46 data rows,
   seven contain `$13/hr` and seven contain `TBC`; others contain numeric rates
   such as `15`. Examples: K6 is `$13/hr`, K10 is `TBC`, and K4 is `15`.
