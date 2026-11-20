@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kaya-kopi"
+version = "0.1.0"
+description = "Grounded operations copilot and ingestion pipeline for Kaya Kopi"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "langchain-core>=0.3,<2",
+  "langchain-openai>=0.2,<2",
+  "langgraph>=0.2,<2",
+  "langgraph-checkpoint-sqlite>=2,<4",
+  "openpyxl>=3.1,<4",
+  "pydantic>=2,<3",
+  "PyMySQL>=1.1,<2",
+  "python-dotenv>=1,<2",
+  "streamlit>=1.30,<2",
+]
+
+[project.optional-dependencies]
+ocr = [
+  "Pillow>=10,<13",
+  "paddleocr>=3.3,<4",
+  "paddlepaddle>=3.2,<4",
+]
+dev = [
+  "pre-commit>=4,<5",
+  "pytest>=8,<9",
+  "ruff>=0.8,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kaya_kopi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
