@@ -1,9 +1,7 @@
 # Team 1 (Kaya Kopi) — Data Audit
 
-Audit of the client data package delivered 16 Nov 2026; inventory and counts
-rechecked 20 Nov 2026. Findings reconciled against
-[CK's traps](data/docs/data_quality_traps_ck.md) and
-[Pran's traps](Pran_Data_Quality_Trap_List.md).
+Audit of the client data package delivered 19 Nov 2026; inventory and counts
+rechecked 20 Nov 2026.
 Sources: `sql/kayakopi_pos.sql`, `tabular/*.csv` (8 outlet files),
 `images/supplier_invoices/*.jpg` (69 scans), `docs/emails/*`, `docs/whatsapp_exports/*`.
 Paths below are relative to `data/` unless explicitly stated otherwise.
