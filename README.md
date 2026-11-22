@@ -6,15 +6,69 @@ customer on **Fri 27 Nov 2026**.
 
 ## Quick start
 
+Prerequisite: Docker Desktop, or Docker Engine with Docker Compose v2.
+
 ```bash
-git clone <this repo>
+git clone <repository-url>
 cd team1_kaya_kopi
-python3 -m venv .venv && source .venv/bin/activate
-cp .env.example .env          # paste in your team API key (handed out at the briefing)
-# download your team zip from NTULearn and unzip into data/  (see data/README.md)
-docker compose up -d          # local MySQL — or use MySQL Workbench directly
-docker compose exec -T mysql mysql -uroot -pcapstone < data/sql/<dump>.sql
+cp .env.example .env
+# Configure the passwords, ports and OPENAI_API_KEY in .env.
+# Copy the client package contents into data/; see data/README.md.
+./scripts/bootstrap.sh
+./scripts/reload_data.sh
+./scripts/test.sh
+./scripts/start.sh
 ```
+
+Open <http://localhost:8501> (or the configured `KAYA_STREAMLIT_HOST_PORT`). Docker images provide
+the isolated Python environments; no host virtual environment or manual `pip install` is required.
+
+The commands have deliberately separate responsibilities:
+
+- `bootstrap.sh` validates the environment and builds the images;
+- `reload_data.sh` explicitly purges and rebuilds the database from the private inputs;
+- `test.sh` runs the parser tests and read-only database health/functional checks; and
+- `start.sh` starts MySQL and Streamlit without rerunning ingestion or tests.
+
+The first run is slower because Docker builds the application images and PaddleOCR downloads its
+English model. Parsed files remain under the git-ignored `runtime/` directory, the MySQL data
+uses a Docker volume, and chat checkpoints use a separate Docker volume.
+
+Useful commands:
+
+```bash
+docker compose logs -f copilot  # application logs
+docker compose down             # stop services; preserve database volumes
+./scripts/reload_data.sh         # explicitly purge and rebuild business data
+```
+
+The deterministic test command does not call the LLM. To manually review the non-deterministic
+answers against the project acceptance questions after loading the database, run:
+
+```bash
+docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
+```
+
+This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
+it is intentionally not part of the automated test suite.
+
+See [docs/implementation/ingestion.md](docs/implementation/ingestion.md) for individual parser,
+schema and loader commands.
+
+## Python development
+
+The installable package uses the standard `src/` layout. For local development outside Docker:
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pytest
+.venv/bin/python -m ruff check src tests scripts
+```
+
+Install the OCR extra with `.[ocr]` when working on invoice-image ingestion. Application code lives
+under `src/kaya_kopi/`; private inputs, generated runtime files, operational scripts, and tests stay
+outside the package.
 
 ## Rules of engagement
 
@@ -22,19 +76,19 @@ docker compose exec -T mysql mysql -uroot -pcapstone < data/sql/<dump>.sql
 2. **Every member contributes.** Team-process marks are graded per person from commit history — every member commits real work under their own GitHub account (set `git config user.email` to the e-mail on your GitHub profile, or your commits are credited to nobody). Pair-programming is fine; say so in commit messages (`Co-authored-by:`).
 3. **Budget.** Your API key has a hard budget. Watch your spend; a burned key is not replaced.
 4. **Cite everything.** Answers your app gives must say where the fact came from. See [HARNESS_CHECKLIST.md](HARNESS_CHECKLIST.md) — it is the grading rubric in checklist form.
-5. **Ask the client, by email.** The client is reachable only by email to the course director (subject `Client question — Team N`), replies within two working days and does not take calls. If the brief mentions something that is not in the package, ask — do not guess and do not quietly work around it. Keep every answer in `docs/client_qa.md`.
+5. **Ask the client, by email.** The client is reachable only by email to the course director (subject `Client question — Team N`), replies within two working days and does not take calls. If the brief mentions something that is not in the package, ask — do not guess and do not quietly work around it. Keep every answer in [`docs/client_qa.md`](docs/client_qa.md).
 
 ## Deliverables
 
 - Working application (live demo; a judging panel plays your customer and asks unscripted questions)
-- Architecture documentation with **at least two Mermaid diagrams** (in `docs/`)
+- Architecture documentation with **at least two Mermaid diagrams** in `docs/`
 - Data quality report: every trap you found and how you handled it
 - 5-minute pitch
 - Honest post-mortem (what you'd do differently)
 
 ## Timeline
 
-Briefing Mon 16 Nov (Zoom) · Checkpoint 1 Fri 20 Nov 17:00 (repo only) · Checkpoint 2 Mon 23 Nov 09:00 · one online consult per team next week (Zoom, announced at 5.6) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced at the online consult). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
+Briefing Mon 16 Nov (Zoom) · **Checkpoint 1 Fri 20 Nov, 17:00 (repo review; no meeting)** · Checkpoint 2 Mon 23 Nov · Consults Mon 23 and Tue 24 Nov (Zoom) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced Tue 24 Nov). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
 
 ## Real commit
 - Chandra
