@@ -24,17 +24,17 @@
 
 ## Q14–Q23 — Copilot guardrail policy (raised by team, 20 Nov 2026)
 
-Status: **pending — awaiting client reply** (drafted for the existing email thread, 20 Nov 2026)
+Status: **ANSWERED 23 Nov 2026** (Serene Lim, Finance & Admin Manager — verbatim below; encoded in `src/kaya_kopi/guardrails.py`)
 
 | Q | Question | Answer |
 |---|----------|--------|
-| Q14 | Who is authorized to use the copilot? | *pending* |
-| Q15 | May users retrieve messages from named email/WhatsApp authors, or must individuals be anonymized? | *pending* |
-| Q16 | May the copilot show complete messages, or only relevant redacted excerpts? | *pending* |
-| Q17 | Which information must never be displayed (e.g. personal phone numbers, personal email addresses, home addresses, identity numbers, handwritten names)? | *pending* |
-| Q18 | Are supplier company names, business addresses and GST registration numbers permitted business information? | *pending* |
-| Q19 | Should finance managers, operations staff and outlet managers have different access levels? | *pending* |
-| Q20 | Should the copilot refuse bulk exports of messages, documents or personal information? | *pending* |
-| Q21 | May prompts, answers and retrieved evidence be stored in operational traces? If so, what retention period and redaction rules apply? | *pending* |
-| Q22 | Apart from personal-data requests, are there other question categories the copilot must always refuse? | *pending* |
-| Q23 | Confirm the copilot must not modify records, place orders, send messages or perform other external actions (read-only)? | *pending* |
+| Q14 | Who is authorized to use the copilot? | "Outlet managers, the ops team, me and the boss. Not counter staff." → **ANSWERED 23 Nov**  |
+| Q15 | May users retrieve messages from named email/WhatsApp authors, or must individuals be anonymized? | "Yes, names are fine on work messages. People need to know who reported the broken machine. Never show anyone’s phone number." → **ANSWERED 23 Nov**  |
+| Q16 | May the copilot show complete messages, or only relevant redacted excerpts? | "Show the relevant part of the message, not the whole chat." → **ANSWERED 23 Nov**  |
+| Q17 | Which information must never be displayed (e.g. personal phone numbers, personal email addresses, home addresses, identity numbers, handwritten names)? | "Never show: phone numbers, personal emails, home addresses, NRIC numbers, or any one person’s pay rate. Pay totals by outlet are fine." → **ANSWERED 23 Nov**  |
+| Q18 | Are supplier company names, business addresses and GST registration numbers permitted business information? | "Yes. Supplier names, business addresses and GST numbers are printed on the invoices anyway." → **ANSWERED 23 Nov**  |
+| Q19 | Should finance managers, operations staff and outlet managers have different access levels? | "Keep one access level for everyone. Rule 4 covers pay." → **ANSWERED 23 Nov**  |
+| Q20 | Should the copilot refuse bulk exports of messages, documents or personal information? | "Yes, refuse." → **ANSWERED 23 Nov**  |
+| Q21 | May prompts, answers and retrieved evidence be stored in operational traces? If so, what retention period and redaction rules apply? | "Yes, keep the questions and answers for six months, with the same rules as point 4." → **ANSWERED 23 Nov**  |
+| Q22 | Apart from personal-data requests, are there other question categories the copilot must always refuse? | "Refuse anything about one person’s pay, performance or discipline, and any legal or tax advice. Send those to me. On prices, show the numbers but leave the decision to the boss." → **ANSWERED 23 Nov**  |
+| Q23 | Confirm the copilot must not modify records, place orders, send messages or perform other external actions (read-only)? | "Confirmed. It only reads. No changes, no orders, no messages." → **ANSWERED 23 Nov**  |

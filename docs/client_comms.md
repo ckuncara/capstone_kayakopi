@@ -38,6 +38,8 @@
 | 17 Nov | T→C | Email (drafted) | Client question — Team 1 | 9 data-audit questions (v1) prepared in `client_email_draft.md` | Merged to v2 (13 Qs) — Mike |
 | 18 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received**: Q1 answered (AMK-3A = 1 Jan 2026, alias of AMK-03) · Q2 answered (69 = complete) · Q3 **cut off in relay** ("3. POS export completeness. It") · roster attached | Log full reply in `client_qa.md` — Mike ⚠️ **rest of email (Q3–Q13) still missing** |
 | 18 Nov | C→T | Email attach | — | **Staff roster received**: `staff_roster_jun2026.xlsx` → saved `data/staff_roster_jun2026.xlsx` (Jun 2026, 12 outlets, 45 staff rows; 4 rates "TBC") | Unblocks Q12 / over-staffing answers |
+| 23 Nov | T→C | Email | Client question — Team 1 (RE) | Sent guardrail-policy confirmation Q14–Q23 (10 questions) in the existing thread; safe defaults stated; soft deadline Wed 25 Nov | Awaiting reply — Mike |
+| 23 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received — ALL 10 answered** (Q14–Q23): “Your defaults are fine” + per-question answers (Serene Lim). Full verbatim in `client_qa.md`; encoded in `src/kaya_kopi/guardrails.py` | ✅ Logged + policy in code 23 Nov — Mike |
 
 ---
 
@@ -85,7 +87,7 @@
 - Q11 — WASTAGE_KG = daily outlet-wide bin weight, not product-specific; only BDK-01 (Faridah) & WDL-01 record; others = "no data" (don't impute) — 18 Nov (pt 11)
 - ✅ **All 13 questions answered (18 Nov)** — reply signed **Serene Lim, Finance & Admin Manager, Kaya Kopi Holdings**
 - 📌 **New request (Serene Lim, 18 Nov):** cost trend from the invoices for the **10-cent kopi question** — ready before **demo day (27 Nov)**; build from paper invoices (source of truth per pt 7), not `total_amount`
-
+- ✅ **All 10 guardrail questions answered (23 Nov)** — Q14–Q23 (authorized users; named authors OK / no phone numbers; excerpts only; never show phone/email/home address/NRIC/individual pay rate — outlet pay totals OK; supplier names+GST OK; one access level; refuse bulk exports; keep traces 6 months w/ pt-4 redaction; refuse individual pay/performance/discipline + legal/tax → forward to client, prices = show numbers, boss decides; read-only confirmed). Encoded in `src/kaya_kopi/guardrails.py`
 ---
 
 ## Open items / blockers
@@ -130,4 +132,4 @@ Don't email the client directly — route through me so we ask once, clearly.
 
 - Guardrail policy confirmation, Q14–Q23 (see `client_qa.md`), to be sent in the same thread.
 - Framing: safe defaults already in place (read-only, PII redaction, no bulk exports); client answers finalize the policy in code; soft deadline Wed 25 Nov ahead of the 27 Nov demo.
-- Status: **awaiting client reply** (SLA: 2 working days).
+- Status: **SENT 23 Nov in the same thread; reply received same day — all 10 answered**. Defaults confirmed by client; policy locked in code (`src/kaya_kopi/guardrails.py`); verbatim answers in `client_qa.md` (Q14–Q23).
