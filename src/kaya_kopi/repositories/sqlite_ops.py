@@ -372,6 +372,68 @@ class SQLiteOpsRepository:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def find_invoice(self, invoice_number: str, branch_code: str) -> dict | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT file_hash, invoice_number, branch_code, vendor_name, invoice_date,
+                       currency, ocr_subtotal, ocr_gst_amount, ocr_grand_total,
+                       audit_status, audit_issues
+                FROM supplier_invoices
+                WHERE invoice_number = ? COLLATE NOCASE
+                  AND (? = 'HQ' OR branch_code = ? COLLATE NOCASE)
+                """,
+                (invoice_number, branch_code.upper(), branch_code),
+            ).fetchone()
+            if row is None:
+                return None
+            invoice = dict(row)
+            invoice["items"] = [
+                dict(item)
+                for item in conn.execute(
+                    """
+                    SELECT line_no, description, ocr_quantity, ocr_unit_price,
+                           ocr_line_total, is_valid
+                    FROM supplier_invoice_items
+                    WHERE file_hash = ? ORDER BY line_no
+                    """,
+                    (invoice["file_hash"],),
+                )
+            ]
+            return invoice
+
+    def get_price_observations(self, year: int, branch_code: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT i.invoice_number, i.invoice_date, i.vendor_name, i.currency,
+                       i.is_gst_inclusive, i.audit_status, l.line_no, l.description,
+                       l.ocr_unit_price, l.is_valid
+                FROM supplier_invoices i
+                JOIN supplier_invoice_items l ON l.file_hash = i.file_hash
+                WHERE i.invoice_date >= ? AND i.invoice_date < ?
+                  AND (? = 'HQ' OR i.branch_code = ? COLLATE NOCASE)
+                ORDER BY i.invoice_date, i.invoice_number, l.line_no
+                """,
+                (f"{year:04d}-01-01", f"{year + 1:04d}-01-01",
+                 branch_code.upper(), branch_code),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_invoice_summaries(self, branch_code: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT invoice_number, branch_code, vendor_name, invoice_date, currency,
+                       ocr_grand_total, audit_status
+                FROM supplier_invoices
+                WHERE (? = 'HQ' OR branch_code = ? COLLATE NOCASE)
+                ORDER BY invoice_date, invoice_number
+                """,
+                (branch_code.upper(), branch_code),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def get_analytics(self) -> dict:
         with self._connect() as conn:
             kpis = conn.execute(

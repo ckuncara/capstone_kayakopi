@@ -14,22 +14,27 @@ python scripts/backfill_supplier_invoices.py
 """
 import argparse
 import mimetypes
+import sys
 from pathlib import Path
+
 from dotenv import load_dotenv
-from kaya_kopi.config import AppConfig
-from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+load_dotenv()
+
+from kaya_kopi.config import AppConfig  # noqa: E402
+from kaya_kopi.ingestion.parsers.invoice_vision_audit import (  # noqa: E402
     extract_invoice_with_openai,
     validate_invoice_calculations,
 )
-from kaya_kopi.repositories.chroma_store import SharedChromaRepository
-from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
-from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard
+from kaya_kopi.repositories.chroma_store import SharedChromaRepository  # noqa: E402
+from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository  # noqa: E402
+from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard  # noqa: E402
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 def main() -> None:
-    load_dotenv()
     parser = argparse.ArgumentParser(description="Backfill supplier invoice images.")
     parser.add_argument("--branch", default="HQ", help="Branch tag to assign (default: HQ)")
     parser.add_argument("--limit", type=int, default=0, help="Max images to process (0 = all)")

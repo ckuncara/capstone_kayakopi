@@ -141,7 +141,7 @@ class SharedChromaRepository:
 
         where_clause = None
         if len(filters) == 1:
-            where_clause = filters
+            where_clause = filters[0]
         elif len(filters) > 1:
             where_clause = {"$and": filters}
 
@@ -150,7 +150,11 @@ class SharedChromaRepository:
             n_results=min(n_results, total),
             where=where_clause,
         )
-        return list(zip(res["metadatas"], res["documents"]))
+        metadatas = res["metadatas"]
+        documents = res["documents"]
+        if metadatas is None or documents is None:
+            raise RuntimeError("ChromaDB query did not return metadata and documents")
+        return list(zip(metadatas[0], documents[0], strict=True))
 
     def delete_document(self, parent_doc_id: str) -> None:
         self.get_collection().delete(where={"parent_doc_id": parent_doc_id})
