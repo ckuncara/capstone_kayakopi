@@ -97,13 +97,80 @@ def retrieve_all_threads() -> list[str]:
     return thread_ids
 
 
+def _content_str(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text", "")) if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content)
+
+
 def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dict]]:
-    """Stream one user turn through the LLM/tool loop."""
-    from langchain_core.messages import HumanMessage
+    """Stream one user turn through the LLM/tool loop, with guardrails applied.
+
+    Input guard  - check_input blocks prompt-injection / oversized input before
+                   the LLM is called; a blocked turn yields a single refusal.
+    Output guard - every AI message (and every tool result) is passed through
+                   sanitize_output so PII is stripped. Sanitization is applied
+                   to the *complete* message, not per token, because a PII pattern
+                   (phone / NRIC / email) can be split across streamed chunks.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+    from kaya_kopi.guardrails import InputBlockedError, check_input, sanitize_output
+
+    # --- input guard -------------------------------------------------------
+    try:
+        check_input(message)
+    except InputBlockedError as exc:
+        yield (
+            AIMessage(
+                content=(
+                    "I can't work with that request as phrased. "
+                    "I'm a read-only operations assistant, so I can help with sales, "
+                    "invoices, suppliers, documents, and data-quality questions."
+                )
+            ),
+            {},
+        )
+        return
 
     config = {"configurable": {"thread_id": thread_id}}
-    yield from get_chatbot().stream(
+    ai_buf: list[str] = []
+    last_meta: dict = {}
+
+    for item in get_chatbot().stream(
         {"messages": [HumanMessage(content=message)]},
         config=config,
         stream_mode="messages",
-    )
+    ):
+        msg, meta = item
+        last_meta = meta if isinstance(meta, dict) else {}
+        if isinstance(msg, AIMessage):
+            text = _content_str(msg.content)
+            if text:
+                ai_buf.append(text)
+            continue
+
+        # A non-AI message closes the current AI segment -> flush it sanitized.
+        if ai_buf:
+            yield (AIMessage(content=sanitize_output("".join(ai_buf))), last_meta)
+            ai_buf = []
+
+        if isinstance(msg, ToolMessage):
+            yield (
+                ToolMessage(
+                    content=sanitize_output(_content_str(msg.content)),
+                    name=msg.name,
+                    tool_call_id=msg.tool_call_id,
+                ),
+                last_meta,
+            )
+        else:
+            yield (msg, last_meta)
+
+    if ai_buf:
+        yield (AIMessage(content=sanitize_output("".join(ai_buf))), last_meta)

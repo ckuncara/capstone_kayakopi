@@ -45,11 +45,11 @@ def check_input(text: str) -> str:
 
 PII_PATTERNS = [
     # SG NRIC: 1-2 letters + 6-7 digits (incl. -4)
-    (re.compile(r"\b[A-Za-z]?\d{6}[A-Za-z]?\d?\b"), "[REDACTED-ID]"),
+    (re.compile(r"[A-Z][0-9]{6,7}[A-Z]"), "[REDACTED-ID]"),
     # emails
     (re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"), "[REDACTED-EMAIL]"),
     # SG phone: 8 digits, optionally +65
-    (re.compile(r"\+?6?5[\s-]?\d{4}[\s-]?\d{4}\b"), "[REDACTED-PHONE]"),
+    (re.compile(r"(?<![0-9])(?:65 )?6?[0-9]{4} ?[0-9]{4}(?![0-9])"), "[REDACTED-PHONE]"),
 ]
 
 
@@ -113,6 +113,7 @@ NEVER_DISPLAY_INDIVIDUAL = {
     "one_persons_pay_rate",
 }
 DISPLAY_ALLOWED = {
+    "author_name",                # Q2: names are fine on work messages
     "pay_totals_by_outlet",       # Q4: pay totals by outlet are fine
     "supplier_name",              # Q5: supplier business info permitted
     "supplier_business_address",  # Q5
@@ -163,7 +164,9 @@ def is_bulk_export(request: str) -> bool:
     """Q7: heuristic flag for a bulk-export request (to be refused)."""
     low = (request or "").lower()
     markers = ["export all", "download all", "give me all", "full list of every",
-               "every message", "all messages", "bulk", "entire export"]
+               "every message", "all messages", "bulk", "entire export",
+               "every invoice", "all invoices", "full sales", "entire sales",
+               "all records", "every record", "dump the full", "complete database"]
     return any(m in low for m in markers)
 
 
