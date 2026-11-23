@@ -34,6 +34,34 @@ class StreamlitEntrypointTest(unittest.TestCase):
         self.assertNotIn("No module named 'kaya_kopi'", combined_output)
         self.assertEqual(result.returncode, 0, combined_output)
 
+    def test_ocr_harness_imports_without_pythonpath(self) -> None:
+        repository_root = Path(__file__).resolve().parents[2]
+        app = repository_root / "src" / "kaya_kopi" / "test_kaya_ocr_chroma.py"
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        environment["OPENAI_API_KEY"] = ""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            environment["LOCAL_SQLITE_PATH"] = str(temporary_path / "test.sqlite3")
+            environment["SUPPLIER_INVOICE_DIR"] = str(temporary_path / "invoices")
+            code = (
+                "import sys; from streamlit.testing.v1 import AppTest; "
+                "app = AppTest.from_file(sys.argv[1], default_timeout=60).run(); "
+                "assert not app.exception, str(app.exception); "
+                "assert app.title[0].value == 'Kaya Kopi — Supplier Invoice OCR & ChromaDB Test Harness'"
+            )
+            result = subprocess.run(
+                [sys.executable, "-I", "-c", code, str(app)],
+                cwd=temporary_directory,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
