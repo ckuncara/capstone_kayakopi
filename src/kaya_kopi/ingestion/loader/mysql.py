@@ -7,6 +7,7 @@ import argparse
 import csv
 import hashlib
 import json
+import mimetypes
 import os
 from datetime import datetime
 from decimal import Decimal
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from kaya_kopi.paths import project_root
+from kaya_kopi.ingestion.reconciliation import select_purchase
 
 
 def parse_args() -> argparse.Namespace:
@@ -193,7 +195,7 @@ class Loader:
                 source_file,
                 image_path,
                 "supplier_invoice",
-                "image/jpeg",
+                mimetypes.guess_type(image_path.name)[0] or "application/octet-stream",
                 raw_text=payload.get("text", ""),
                 ocr_json_uri=row["ocr_json"],
                 confidence=row["mean_ocr_confidence"],
@@ -355,6 +357,7 @@ class Loader:
     def load_invoices(
         self, invoice_rows: list[dict[str, str]], item_rows: list[dict[str, str]]
     ) -> None:
+        skipped: set[tuple[str, str]] = set()
         invoice_sql = """
             INSERT INTO supplier_invoice
                 (source_document_id, supplier_purchase_id, invoice_number, supplier_name,
@@ -378,11 +381,21 @@ class Loader:
         with self.connection.cursor() as cursor:
             for row in invoice_rows:
                 cursor.execute(
+                    """SELECT i.supplier_invoice_id FROM supplier_invoice i
+                       JOIN ocr_invoice_sync s ON s.supplier_invoice_id=i.supplier_invoice_id
+                       WHERE UPPER(TRIM(i.invoice_number))=%s
+                         AND UPPER(TRIM(i.supplier_name))=%s""",
+                    (row["invoice_number"].strip().upper(), row["supplier_name"].strip().upper()),
+                )
+                if cursor.fetchone():
+                    skipped.add((row["source_file"], row["invoice_number"]))
+                    continue
+                cursor.execute(
                     invoice_sql,
                     (
                         self.source_ids[row["source_file"]], row["invoice_number"],
                         row["supplier_name"], row["supplier_address"],
-                        row["gst_registration_number"], row["invoice_date"], row["bill_to"],
+                        row["gst_registration_number"], nullable(row["invoice_date"]), row["bill_to"],
                         row["subtotal"], row["gst_rate_percent"], row["gst_amount"], row["total"],
                         nullable(row["payment_terms"]), nullable(row["received_condition"]),
                         nullable(row["mean_ocr_confidence"]), bool_value(row["arithmetic_valid"]),
@@ -412,6 +425,7 @@ class Loader:
                 row["extraction_status"], nullable(row["review_notes"]),
             )
             for row in item_rows
+            if (row["source_file"], row["invoice_number"]) not in skipped
         ]
         self.execute_many(item_sql, values)
 
@@ -426,11 +440,23 @@ class Loader:
             )
             purchases = list(cursor.fetchall())
             cursor.execute(
+                """SELECT DISTINCT r.supplier_purchase_id
+                   FROM purchase_invoice_reconciliation r
+                   JOIN ocr_invoice_sync s ON s.supplier_invoice_id=r.supplier_invoice_id
+                   UNION
+                   SELECT i.supplier_purchase_id FROM supplier_invoice i
+                   JOIN ocr_invoice_sync s ON s.supplier_invoice_id=i.supplier_invoice_id
+                   WHERE i.supplier_purchase_id IS NOT NULL"""
+            )
+            protected_purchases = {row["supplier_purchase_id"] for row in cursor.fetchall()}
+            cursor.execute(
                 """
                 SELECT i.supplier_invoice_id, s.supplier_code, i.invoice_number,
                        i.invoice_date, i.subtotal
                 FROM supplier_invoice i
                 JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                LEFT JOIN ocr_invoice_sync sync ON sync.supplier_invoice_id=i.supplier_invoice_id
+                WHERE sync.supplier_invoice_id IS NULL AND i.currency='SGD'
                 ORDER BY i.supplier_invoice_id
                 """
             )
@@ -439,6 +465,8 @@ class Loader:
             purchases_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
             invoices_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for purchase in purchases:
+                if purchase["purchase_id"] in protected_purchases:
+                    continue
                 key = (purchase["supplier_code"], purchase["invoice_no"].strip().upper())
                 purchases_by_key.setdefault(key, []).append(purchase)
             for invoice in invoices:
@@ -451,22 +479,8 @@ class Loader:
                 for invoice in candidate_invoices:
                     if not available_purchases:
                         continue
-                    selected = min(
-                        available_purchases,
-                        key=lambda purchase: (
-                            datetime.strptime(purchase["purchase_date"], "%d/%m/%Y").date()
-                            != invoice["invoice_date"],
-                            abs(Decimal(purchase["total_amount"]) - Decimal(invoice["subtotal"])),
-                            purchase["purchase_id"],
-                        ),
-                    )
-                    purchase_date = datetime.strptime(
-                        selected["purchase_date"], "%d/%m/%Y"
-                    ).date()
-                    method = (
-                        "SUPPLIER_INVOICE_NUMBER_DATE"
-                        if purchase_date == invoice["invoice_date"]
-                        else "SUPPLIER_INVOICE_NUMBER_CLOSEST_AMOUNT"
+                    selected, method = select_purchase(
+                        available_purchases, invoice["invoice_date"], Decimal(invoice["subtotal"])
                     )
                     matches[selected["purchase_id"]] = (invoice, method)
                     available_purchases.remove(selected)
@@ -488,6 +502,8 @@ class Loader:
                     reconciled_at=CURRENT_TIMESTAMP
             """
             for purchase in purchases:
+                if purchase["purchase_id"] in protected_purchases:
+                    continue
                 matched = matches.get(purchase["purchase_id"])
                 if matched:
                     invoice, method = matched

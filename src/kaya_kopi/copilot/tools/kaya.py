@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import pymysql
+from dotenv import load_dotenv
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.mysql import MySQLRepository
+from kaya_kopi.security.budget_guard import BudgetGuard
+from kaya_kopi.security.pdpa_scrubber import scrub_pdpa
+
+if TYPE_CHECKING:
+    from kaya_kopi.config import AppConfig
+    from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 
 
 class OutletSalesInput(BaseModel):
@@ -230,6 +240,82 @@ def get_data_quality_issues_sql(
     return _call("get_data_quality_issues", status, severity, rule_code, limit)
 
 
+@dataclass(frozen=True)
+class InvoiceToolContext:
+    """Per-invocation settings for local invoice tools."""
+
+    sql_repo: SQLiteOpsRepository
+    cfg: AppConfig
+    budget: BudgetGuard
+    top_k: int = 3
+    retrieved_hits: list[tuple[dict, str]] | None = None
+
+
+def _invoice_context(config: RunnableConfig) -> InvoiceToolContext:
+    context = config.get("configurable", {}).get("kaya_invoice_context")
+    if context is not None:
+        if not isinstance(context, InvoiceToolContext):
+            raise TypeError("kaya_invoice_context must be an InvoiceToolContext.")
+        return context
+
+    # AppConfig evaluates environment defaults when its module is first imported.
+    load_dotenv(project_root() / ".env")
+    from kaya_kopi.config import AppConfig
+    from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
+
+    cfg = AppConfig()
+    return InvoiceToolContext(
+        sql_repo=SQLiteOpsRepository(cfg),
+        cfg=cfg,
+        budget=BudgetGuard(cfg.sqlite_db_path, cfg.monthly_budget_usd),
+    )
+
+
+@tool
+def lookup_invoice_sqlite(question: str, config: RunnableConfig) -> str:
+    """Look up uploaded invoices or analyze local invoice spending, audits and price trends.
+
+    Provide a self-contained question with invoice numbers, supplier names and dates
+    where available. Results cover all branches and may include failed audits.
+    """
+    from kaya_kopi.invoice_chat import sqlite_invoice_answer  # Requires the optional OCR dependencies.
+
+    context = _invoice_context(config)
+    answer = sqlite_invoice_answer(scrub_pdpa(question), "HQ", context.sql_repo)
+    if answer is None:
+        return (
+            "SQLite invoice lookup does not support this question. "
+            "Try searching the invoice OCR chunks or another appropriate tool."
+        )
+    return f"Source: local SQLite invoice records.\n\n{scrub_pdpa(answer)}"
+
+
+@tool
+def search_invoice_chroma(query: str, config: RunnableConfig) -> str:
+    """Search shared invoice OCR chunks across all branches."""
+    from kaya_kopi.repositories.chroma_store import SharedChromaRepository
+
+    context = _invoice_context(config)
+    if not context.cfg.api_key:
+        raise RuntimeError("An OpenAI API key is required to search invoice chunks.")
+    vec_repo = SharedChromaRepository(context.cfg, budget_guard=context.budget)
+    hits = vec_repo.semantic_search(
+        query_text=scrub_pdpa(query),
+        branch_code=None,
+        source_type="invoice",
+        n_results=context.top_k,
+    )
+    if context.retrieved_hits is not None:
+        context.retrieved_hits.extend(hits)
+    if not hits:
+        return "No invoice chunks found across all branches."
+    return "\n\n---\n\n".join(
+        f"Invoice: {meta.get('invoice_number')} | "
+        f"Audit: {meta.get('audit_status')}\n{document}"
+        for meta, document in hits
+    )
+
+
 ALL_TOOLS = [
     get_outlet_sales_sql,
     analyze_outlets_sql,
@@ -239,4 +325,6 @@ ALL_TOOLS = [
     search_documents_sql,
     assess_kopi_price_change_sql,
     get_data_quality_issues_sql,
+    lookup_invoice_sqlite,
+    search_invoice_chroma,
 ]

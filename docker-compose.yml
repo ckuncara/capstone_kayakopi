@@ -13,6 +13,43 @@ services:
       timeout: 5s
       retries: 10
 
+  chroma:
+    image: chromadb/chroma:1.5.9
+    user: "${KAYA_DOCKER_UID:-1000}:${KAYA_DOCKER_GID:-1000}"
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KAYA_CHROMA_HOST_PORT:-8000}:8000"
+    volumes:
+      - ./data/local_chroma_db:/data
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - "exec 3<>/dev/tcp/127.0.0.1/8000 && printf 'GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n' >&3 && read -r status <&3 && [[ \"$$status\" == *' 200 '* ]]"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  copilot-runtime-permissions:
+    image: python:3.12-slim
+    user: "0:0"
+    environment:
+      DATA_UID: "${KAYA_DOCKER_UID:-1000}"
+      DATA_GID: "${KAYA_DOCKER_GID:-1000}"
+    volumes:
+      - copilot_runtime:/runtime
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        chown "$$DATA_UID:$$DATA_GID" /runtime
+        for file in /runtime/kaya_chat.sqlite3 /runtime/kaya_chat.sqlite3-wal /runtime/kaya_chat.sqlite3-shm /runtime/kaya_chat.sqlite3-journal /runtime/llm_usage.sqlite3 /runtime/llm_usage.sqlite3-wal /runtime/llm_usage.sqlite3-shm /runtime/llm_usage.sqlite3-journal; do
+          if [ -e "$$file" ]; then
+            chown "$$DATA_UID:$$DATA_GID" "$$file"
+          fi
+        done
+
   ingest:
     profiles: ["setup"]
     build:
@@ -22,15 +59,24 @@ services:
     working_dir: /workspace
     volumes:
       - .:/workspace
+    env_file:
+      - .env
     environment:
       HOME: /workspace/.runtime
       KAYA_PROJECT_ROOT: /workspace
+      LOCAL_SQLITE_PATH: /workspace/data/kaya_ops.db
+      SUPPLIER_INVOICE_DIR: /workspace/data/images/supplier_invoices
+      AUDITED_INVOICE_CSV: /workspace/data/images/supplier_invoices/supplier_invoices_audited.csv
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
       KAYA_DB_HOST: mysql
       KAYA_DB_PORT: ${KAYA_DB_PORT:-3306}
       KAYA_DB_USER: ${KAYA_DB_USER}
       KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
     depends_on:
       mysql:
+        condition: service_healthy
+      chroma:
         condition: service_healthy
     command: ["./scripts/ingest_container.sh"]
     restart: "no"
@@ -39,22 +85,34 @@ services:
     build:
       context: .
       dockerfile: docker/copilot.Dockerfile
+    user: "${KAYA_DOCKER_UID:-1000}:${KAYA_DOCKER_GID:-1000}"
     env_file:
       - .env
     environment:
+      HOME: /runtime
       KAYA_DB_HOST: mysql
       KAYA_DB_PORT: ${KAYA_DB_PORT:-3306}
       KAYA_DB_USER: ${KAYA_DB_USER}
       KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
       KAYA_CHAT_DB: /runtime/kaya_chat.sqlite3
       KAYA_PROJECT_ROOT: /workspace
+      LOCAL_SQLITE_PATH: /workspace/data/kaya_ops.db
+      SUPPLIER_INVOICE_DIR: /workspace/data/images/supplier_invoices
+      AUDITED_INVOICE_CSV: /workspace/data/images/supplier_invoices/supplier_invoices_audited.csv
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
     ports:
       - "${KAYA_STREAMLIT_HOST_PORT:-8501}:8501"
     volumes:
       - copilot_runtime:/runtime
+      - ./data:/workspace/data
     depends_on:
       mysql:
         condition: service_healthy
+      chroma:
+        condition: service_healthy
+      copilot-runtime-permissions:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   test:

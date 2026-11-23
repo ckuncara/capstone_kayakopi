@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Batch-ingest existing supplier invoice images from data/images/supplier_invoices/
-into SQLite (WAL), ChromaDB (single unified chunk), individual CSVs, and master CSV.
+into SQLite, MySQL, ChromaDB, individual CSVs, and the master CSV.
 
 Example usage:
 # Preview pending images without calling OpenAI
@@ -36,7 +36,6 @@ SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill supplier invoice images.")
-    parser.add_argument("--branch", default="HQ", help="Branch tag to assign (default: HQ)")
     parser.add_argument("--limit", type=int, default=0, help="Max images to process (0 = all)")
     parser.add_argument("--force", action="store_true", help="Re-process already stored invoices")
     parser.add_argument("--dry-run", action="store_true", help="List pending images without API calls")
@@ -58,6 +57,7 @@ def main() -> None:
 
     processed = 0
     skipped = 0
+    mysql_failures = 0
 
     for img_path in image_files:
         if args.limit and processed >= args.limit:
@@ -85,20 +85,21 @@ def main() -> None:
                 ocr_model=cfg.ocr_model,
                 api_key=cfg.api_key,
                 budget_guard=budget,
-                branch_code=args.branch,
+                branch_code=None,
             )
+            repo.check_sync_identity(f_hash, inv.invoice_number, inv.vendor_name)
             stored_name, rel_img_path = repo.save_image_as_invoice_jpg(
                 raw_bytes, inv.invoice_number or stem_invoice_no, f_hash
             )
             audit = validate_invoice_calculations(inv)
 
-            repo.save_invoice(f_hash, args.branch, stored_name, rel_img_path, inv, audit)
+            repo.save_invoice(f_hash, None, stored_name, rel_img_path, inv, audit, sync_mysql=True)
             indiv_csv = repo.save_individual_invoice_csv(
-                stored_name, rel_img_path, args.branch, inv, audit
+                stored_name, rel_img_path, None, inv, audit
             )
 
             unified_doc = (
-                f"Invoice: {inv.invoice_number} | Branch: {args.branch.upper()} | "
+                f"Invoice: {inv.invoice_number} | "
                 f"Vendor: {inv.vendor_name} (GST Reg: {inv.vendor_gst_reg_no or 'N/A'}) | "
                 f"Date: {inv.invoice_date or 'N/A'}\n"
                 f"OCR Totals -> Subtotal: {audit['ocr_subtotal']:.2f}, "
@@ -112,7 +113,7 @@ def main() -> None:
             vec_repo.ingest_document(
                 parent_doc_id=f_hash,
                 source_type="invoice",
-                branch_code=args.branch,
+                branch_code=None,
                 text=unified_doc,
                 strategy="single",
                 extra_metadata={
@@ -123,6 +124,18 @@ def main() -> None:
                     "audit_status": "PASS" if audit["all_valid"] else "FAIL",
                 },
             )
+            sync = next(entry for entry in pending_syncs(repo) if entry["file_hash"] == f_hash)
+            try:
+                result = sync_invoice(repo, sync["upload_id"])
+            except (pymysql.MySQLError, ValueError, OSError) as exc:
+                mysql_failures += 1
+                print(
+                    f"  -> MySQL sync failed for {inv.invoice_number}: {exc}. "
+                    "The local invoice remains pending for retry in Settings.",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"  -> {result.message}")
             status_tag = "PASS" if audit["all_valid"] else f"FAIL ({len(audit['issues'])} issues)"
             print(f"  -> {status_tag} | Saved {rel_img_path} & {indiv_csv}")
             processed += 1
@@ -136,6 +149,8 @@ def main() -> None:
         print(f"Synced master CSV -> {master_csv}")
 
     print(f"Done. Processed: {processed} | Skipped existing: {skipped}")
+    if mysql_failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

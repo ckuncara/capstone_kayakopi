@@ -3,17 +3,16 @@ import hashlib
 import io
 import json
 import os
-from pathlib import Path
 import re
 import sqlite3
 import tempfile
+import uuid
 from PIL import Image
 from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import InvoiceOCRResult
 
 CSV_FIELDNAMES = [
     "invoice_number",
-    "branch_code",
     "filename",
     "image_path",
     "vendor_name",
@@ -67,7 +66,7 @@ class SQLiteOpsRepository:
                 CREATE TABLE IF NOT EXISTS supplier_invoices (
                     file_hash TEXT PRIMARY KEY,
                     invoice_number TEXT UNIQUE,
-                    branch_code TEXT DEFAULT 'HQ',
+                    branch_code TEXT,
                     filename TEXT NOT NULL,
                     image_path TEXT NOT NULL,
                     vendor_name TEXT,
@@ -106,6 +105,13 @@ class SQLiteOpsRepository:
                     line_diff REAL,
                     is_valid INTEGER,
                     FOREIGN KEY (file_hash) REFERENCES supplier_invoices(file_hash) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS mysql_invoice_sync (
+                    upload_id TEXT PRIMARY KEY,
+                    file_hash TEXT NOT NULL UNIQUE,
+                    invoice_number TEXT NOT NULL UNIQUE,
+                    pending INTEGER NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS api_usage_logs (
@@ -148,38 +154,107 @@ class SQLiteOpsRepository:
             return False
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT 1 FROM supplier_invoices WHERE invoice_number = ?", (clean_no,)
+                "SELECT 1 FROM supplier_invoices WHERE invoice_number = ? COLLATE NOCASE",
+                (clean_no,),
             ).fetchone()
             return row is not None
 
+    @staticmethod
+    def _sync_identity(conn, file_hash: str, invoice_number: str, vendor_name: str) -> str | None:
+        rows = conn.execute(
+            """SELECT s.upload_id, s.invoice_number, i.vendor_name
+               FROM mysql_invoice_sync s
+               LEFT JOIN supplier_invoices i ON i.file_hash=s.file_hash
+               WHERE s.file_hash=? OR s.invoice_number=?""",
+            (file_hash, invoice_number.strip()),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ValueError("The file and invoice number belong to different MySQL syncs.")
+        if not rows:
+            return None
+        row = rows[0]
+        if (row["invoice_number"].strip().upper() != invoice_number.strip().upper()
+                or not row["vendor_name"]
+                or row["vendor_name"].strip().upper() != vendor_name.strip().upper()):
+            raise ValueError("The synchronized invoice identity changed; resolve it before uploading.")
+        return row["upload_id"]
+
+    def check_sync_identity(self, file_hash: str, invoice_number: str, vendor_name: str) -> None:
+        with self._connect() as conn:
+            self._sync_identity(conn, file_hash, invoice_number, vendor_name)
+
     def save_image_as_invoice_jpg(
-        self, file_bytes: bytes, invoice_number: str, file_hash: str
+        self, file_bytes: bytes, invoice_number: str, file_hash: str,
+        overwrite_existing: bool = True,
+        include_hash_suffix: bool = False,
     ) -> tuple[str, str]:
+        with self._connect() as conn:
+            has_pending_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pending_invoice_deletions'"
+            ).fetchone()
+            if has_pending_table and conn.execute(
+                "SELECT 1 FROM pending_invoice_deletions WHERE file_hash=? OR invoice_number=?",
+                (file_hash, invoice_number.strip()),
+            ).fetchone():
+                raise ValueError("This invoice is pending deletion; finish cleanup before uploading it.")
         stem = re.sub(r"[^a-zA-Z0-9_-]", "", (invoice_number or "").strip())
         if not stem:
             stem = f"INV-{file_hash[:12]}"
+        elif include_hash_suffix:
+            stem = f"{stem}-{file_hash[:12]}"
 
         stored_filename = f"{stem}.jpg"
         target_path = self.cfg.supplier_invoice_dir / stored_filename
 
         with Image.open(io.BytesIO(file_bytes)) as img:
-            img.convert("RGB").save(target_path, format="JPEG", quality=95)
+            if overwrite_existing:
+                img.convert("RGB").save(target_path, format="JPEG", quality=95)
+            else:
+                encoded = io.BytesIO()
+                img.convert("RGB").save(encoded, format="JPEG", quality=95)
+                try:
+                    with target_path.open("xb") as target:
+                        target.write(encoded.getvalue())
+                except FileExistsError:
+                    if target_path.read_bytes() != encoded.getvalue():
+                        raise FileExistsError(f"Refusing to overwrite an existing image: {target_path}")
 
         return stored_filename, f"data/images/supplier_invoices/{stored_filename}"
 
     def save_invoice(
         self,
         file_hash: str,
-        branch_code: str,
+        branch_code: str | None,
         stored_filename: str,
         image_path: str,
         invoice: InvoiceOCRResult,
         audit: dict,
+        sync_mysql: bool = False,
+        allow_replace: bool = True,
     ) -> None:
         status = "PASS" if audit["all_valid"] else f"FAIL ({len(audit['issues'])} issues)"
         issues_json = json.dumps(audit["issues"])
 
         with self._connect() as conn:
+            if not allow_replace:
+                conn.execute("BEGIN IMMEDIATE")
+                if conn.execute(
+                    """SELECT 1 FROM supplier_invoices
+                       WHERE file_hash=? OR invoice_number=? COLLATE NOCASE""",
+                    (file_hash, invoice.invoice_number.strip()),
+                ).fetchone():
+                    raise ValueError("This invoice image or invoice number is already stored.")
+            if sync_mysql:
+                upload_id = self._sync_identity(
+                    conn, file_hash, invoice.invoice_number, invoice.vendor_name
+                ) or uuid.uuid4().hex
+                conn.execute(
+                    """INSERT INTO mysql_invoice_sync (upload_id, file_hash, invoice_number, pending)
+                       VALUES (?, ?, ?, 1)
+                       ON CONFLICT(upload_id) DO UPDATE SET file_hash=excluded.file_hash,
+                           invoice_number=excluded.invoice_number, pending=1""",
+                    (upload_id, file_hash, invoice.invoice_number.strip()),
+                )
             conn.execute(
                 """
                 INSERT OR REPLACE INTO supplier_invoices (
@@ -195,7 +270,7 @@ class SQLiteOpsRepository:
                 (
                     file_hash,
                     invoice.invoice_number.strip(),
-                    branch_code.upper(),
+                    branch_code.upper() if branch_code is not None else None,
                     stored_filename,
                     image_path,
                     invoice.vendor_name,
@@ -247,7 +322,7 @@ class SQLiteOpsRepository:
         self,
         stored_filename: str,
         image_path: str,
-        branch_code: str,
+        branch_code: str | None,
         invoice: InvoiceOCRResult,
         audit: dict,
     ) -> str:
@@ -265,7 +340,6 @@ class SQLiteOpsRepository:
                 writer.writerow(
                     {
                         "invoice_number": invoice.invoice_number.strip(),
-                        "branch_code": branch_code.upper(),
                         "filename": stored_filename,
                         "image_path": image_path,
                         "vendor_name": invoice.vendor_name,
@@ -306,7 +380,7 @@ class SQLiteOpsRepository:
             rows = conn.execute(
                 """
                 SELECT
-                    i.invoice_number, i.branch_code, i.filename, i.image_path,
+                    i.invoice_number, i.filename, i.image_path,
                     i.vendor_name, i.vendor_address, i.vendor_gst_reg_no,
                     i.invoice_date, i.payment_terms, i.currency,
                     l.line_no, l.description AS item_description,
@@ -345,7 +419,7 @@ class SQLiteOpsRepository:
         return "data/images/supplier_invoices/supplier_invoices_audited.csv"
 
     def log_chat(
-        self, branch_code: str, redacted_q: str, redacted_a: str, tools_used: str, cost_usd: float
+        self, branch_code: str | None, redacted_q: str, redacted_a: str, tools_used: str, cost_usd: float
     ) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -354,7 +428,8 @@ class SQLiteOpsRepository:
                     branch_code, redacted_question, redacted_answer, tools_used, cost_usd
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (branch_code.upper(), redacted_q, redacted_a, tools_used, cost_usd),
+                (branch_code.upper() if branch_code is not None else None,
+                 redacted_q, redacted_a, tools_used, cost_usd),
             )
 
     def get_all_invoices(self) -> list[dict]:
@@ -363,6 +438,15 @@ class SQLiteOpsRepository:
                 "SELECT * FROM supplier_invoices ORDER BY created_at DESC"
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_invoice_by_hash(self, file_hash: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM supplier_invoices WHERE file_hash = ?", (file_hash,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("The local invoice no longer exists.")
+            return dict(row)
 
     def get_line_items(self, file_hash: str) -> list[dict]:
         with self._connect() as conn:
