@@ -24,7 +24,7 @@ class QueryToolIntegrationTest(unittest.TestCase):
     def test_public_tool_set_is_consolidated(self) -> None:
         self.assertEqual(
             [tool.name for tool in ALL_TOOLS],
-            ["get_outlet_sales_sql", "analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql"],
+            ["get_outlet_sales_sql", "analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql", "lookup_invoice_sqlite", "search_invoice_chroma"],
         )
 
     def test_get_outlet_sales_infers_alias_effective_source_period_when_dates_are_omitted(self) -> None:
@@ -367,6 +367,10 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(
             result["canonical_cost"],
             {
+                "currency": "SGD",
+                "subtotal": "179.07",
+                "gst": "16.12",
+                "total": "195.19",
                 "subtotal_sgd": "179.07",
                 "gst_sgd": "16.12",
                 "total_sgd": "195.19",

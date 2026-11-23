@@ -42,7 +42,7 @@ class SharedChromaRepository:
         parent_doc_id: str,
         chunks: list[TextChunk],
         source_type: str,
-        branch_code: str = "HQ",
+        branch_code: str | None = "HQ",
         apply_pdpa_scrub: bool = True,
     ) -> int:
         if not chunks:
@@ -65,15 +65,17 @@ class SharedChromaRepository:
 
             ids.append(ch.chunk_id)
             documents.append(clean_text)
-            metadatas.append(
-                {
-                    "parent_doc_id": parent_doc_id,
-                    "source_type": source_type,
-                    "branch_code": branch_code.upper(),
-                    "token_count": tokens,
-                    **ch.metadata,
-                }
-            )
+            metadata = {
+                "parent_doc_id": parent_doc_id,
+                "source_type": source_type,
+                "token_count": tokens,
+                **ch.metadata,
+            }
+            if branch_code is not None:
+                metadata["branch_code"] = branch_code.upper()
+            else:
+                metadata.pop("branch_code", None)
+            metadatas.append(metadata)
 
         col.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
@@ -91,7 +93,7 @@ class SharedChromaRepository:
         self,
         parent_doc_id: str,
         source_type: str,
-        branch_code: str = "HQ",
+        branch_code: str | None = "HQ",
         text: str = "",
         strategy: str = "single",
         num_chunks: int = 1,
@@ -145,6 +147,8 @@ class SharedChromaRepository:
         elif len(filters) > 1:
             where_clause = {"$and": filters}
 
+        if self.budget_guard:
+            self.budget_guard.check_budget_or_raise()
         res = col.query(
             query_texts=[query_text],
             n_results=min(n_results, total),
@@ -158,3 +162,8 @@ class SharedChromaRepository:
 
     def delete_document(self, parent_doc_id: str) -> None:
         self.get_collection().delete(where={"parent_doc_id": parent_doc_id})
+
+    def delete_invoice_document(self, parent_doc_id: str) -> None:
+        self.get_collection().delete(
+            where={"$and": [{"parent_doc_id": parent_doc_id}, {"source_type": "invoice"}]}
+        )

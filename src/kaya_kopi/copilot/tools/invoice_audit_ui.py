@@ -1,4 +1,5 @@
 import streamlit as st
+import pymysql
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from kaya_kopi.config import AppConfig
@@ -9,29 +10,18 @@ from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
 from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
+from kaya_kopi.repositories.mysql_invoice_sync import (
+    completed_syncs, pending_syncs, queue_resync, sync_invoice,
+)
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard
 from kaya_kopi.security.pdpa_scrubber import scrub_pdpa
-
-BRANCH_OPTIONS = [
-    "HQ",
-    "AMK-01",
-    "AMK-03",
-    "BDK-01",
-    "JUR-01",
-    "TAM-01",
-    "TPY-02",
-    "WDL-01",
-    "YIS-02",
-]
-
 
 def render_invoice_audit_panel() -> None:
     default_cfg = AppConfig()
 
     with st.sidebar:
         st.divider()
-        st.subheader("Outlet & OpenAI Config")
-        branch_code = st.selectbox("Active Branch Tag", BRANCH_OPTIONS, index=0)
+        st.subheader("OpenAI Config")
         api_key = st.text_input("OpenAI API Key", type="password", value=default_cfg.api_key)
         with st.expander("OpenAI Models & Budget", expanded=False):
             ocr_model = st.text_input("OCR Model", value=default_cfg.ocr_model)
@@ -61,6 +51,40 @@ def render_invoice_audit_panel() -> None:
     )
 
     with tab_up:
+        sync_notice = st.session_state.pop("mysql_sync_notice", None)
+        if sync_notice is not None:
+            if sync_notice.purchase_id is not None and not sync_notice.review_required:
+                st.success(sync_notice.message)
+            else:
+                st.warning(sync_notice.message)
+        for pending in pending_syncs(repo):
+            st.warning(f"MySQL sync pending: {pending['invoice_number']}")
+            if st.button("Retry MySQL sync", key=f"retry_mysql_{pending['upload_id']}"):
+                try:
+                    result = sync_invoice(repo, pending["upload_id"])
+                except (pymysql.MySQLError, ValueError, OSError) as exc:
+                    st.error("MySQL sync failed; the invoice remains available locally for retry.")
+                    st.exception(exc)
+                else:
+                    st.session_state.mysql_sync_notice = result
+                    st.rerun()
+        synced_invoices = completed_syncs(repo)
+        if synced_invoices:
+            with st.expander("Resync invoices to MySQL"):
+                for synced in synced_invoices:
+                    if st.button(
+                        f"Sync again: {synced['invoice_number']}",
+                        key=f"resync_mysql_{synced['upload_id']}",
+                    ):
+                        try:
+                            queue_resync(repo, synced["upload_id"])
+                            result = sync_invoice(repo, synced["upload_id"])
+                        except (pymysql.MySQLError, ValueError, OSError) as exc:
+                            st.error("MySQL sync failed; the invoice remains available locally.")
+                            st.exception(exc)
+                        else:
+                            st.session_state.mysql_sync_notice = result
+                            st.rerun()
         files = st.file_uploader(
             "Upload supplier invoice images (saved as <invoice_no>.jpg + <invoice_no>.csv)",
             type=["png", "jpg", "jpeg", "webp"],
@@ -86,7 +110,7 @@ def render_invoice_audit_panel() -> None:
                                 cfg.ocr_model,
                                 cfg.api_key,
                                 budget_guard=budget,
-                                branch_code=branch_code,
+                                branch_code=None,
                             )
                             if skip_dups and repo.invoice_number_exists(inv.invoice_number):
                                 st.warning(
@@ -94,21 +118,23 @@ def render_invoice_audit_panel() -> None:
                                 )
                                 continue
 
+                            repo.check_sync_identity(f_hash, inv.invoice_number, inv.vendor_name)
                             stored_name, rel_img_path = repo.save_image_as_invoice_jpg(
                                 raw_bytes, inv.invoice_number, f_hash
                             )
                             audit = validate_invoice_calculations(inv)
 
                             repo.save_invoice(
-                                f_hash, branch_code, stored_name, rel_img_path, inv, audit
+                                f_hash, None, stored_name, rel_img_path, inv, audit,
+                                sync_mysql=True,
                             )
                             indiv_csv = repo.save_individual_invoice_csv(
-                                stored_name, rel_img_path, branch_code, inv, audit
+                                stored_name, rel_img_path, None, inv, audit
                             )
                             master_csv = repo.sync_master_csv_in_image_folder()
 
                             unified_doc = (
-                                f"Invoice: {inv.invoice_number} | Branch: {branch_code} | "
+                                f"Invoice: {inv.invoice_number} | "
                                 f"Vendor: {inv.vendor_name} (GST Reg: {inv.vendor_gst_reg_no or 'N/A'}) | "
                                 f"Date: {inv.invoice_date or 'N/A'}\n"
                                 f"OCR Totals -> Subtotal: {audit['ocr_subtotal']:.2f}, "
@@ -121,7 +147,7 @@ def render_invoice_audit_panel() -> None:
                             vec_repo.ingest_document(
                                 parent_doc_id=f_hash,
                                 source_type="invoice",
-                                branch_code=branch_code,
+                                branch_code=None,
                                 text=unified_doc,
                                 strategy="single",
                                 extra_metadata={
@@ -132,9 +158,25 @@ def render_invoice_audit_panel() -> None:
                                     "audit_status": "PASS" if audit["all_valid"] else "FAIL",
                                 },
                             )
+                            sync = next(
+                                entry for entry in pending_syncs(repo) if entry["file_hash"] == f_hash
+                            )
+                            try:
+                                result = sync_invoice(repo, sync["upload_id"])
+                            except (pymysql.MySQLError, ValueError, OSError) as exc:
+                                st.error("MySQL sync failed; the invoice remains available locally for retry.")
+                                st.exception(exc)
+                            else:
+                                if result.purchase_id is not None and not result.review_required:
+                                    st.success(result.message)
+                                else:
+                                    st.warning(result.message)
                     except BudgetExceededError as exc:
                         st.error(str(exc))
                         break
+                    except ValueError as exc:
+                        st.error(str(exc))
+                        continue
 
                     badge = "✅" if audit["all_valid"] else "⚠️"
                     with st.expander(
@@ -167,13 +209,13 @@ def render_invoice_audit_panel() -> None:
             )
 
     with tab_rag:
-        q = st.text_input("Ask a question (auto-scrubbed for SG PDPA & filtered by branch):")
+        q = st.text_input("Ask a question (auto-scrubbed for SG PDPA):")
         if q and cfg.api_key:
             scrubbed_q = scrub_pdpa(q)
             try:
                 budget.check_budget_or_raise()
                 vec_repo = SharedChromaRepository(cfg, budget_guard=budget)
-                hits = vec_repo.semantic_search(scrubbed_q, branch_code=branch_code, n_results=4)
+                hits = vec_repo.semantic_search(scrubbed_q, branch_code=None, n_results=4)
                 if not hits:
                     st.info("No matching documents found.")
                 else:
@@ -194,9 +236,9 @@ def render_invoice_audit_panel() -> None:
                         cfg.chat_model,
                         estimate_tokens(ctx + scrubbed_q),
                         estimate_tokens(ans_text),
-                        branch_code=branch_code,
+                        branch_code=None,
                     )
-                    repo.log_chat(branch_code, scrubbed_q, ans_text, "semantic_search", cost)
+                    repo.log_chat(None, scrubbed_q, ans_text, "semantic_search", cost)
                     st.markdown(ans_text)
             except BudgetExceededError as exc:
                 st.error(str(exc))

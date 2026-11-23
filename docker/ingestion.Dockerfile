@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 RUN apt-get update \
@@ -8,4 +9,5 @@ RUN apt-get update \
 WORKDIR /workspace
 COPY pyproject.toml README.md /workspace/
 COPY src /workspace/src
-RUN python -m pip install --no-cache-dir ".[ocr]"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip install ".[ocr]"

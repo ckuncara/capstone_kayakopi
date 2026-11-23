@@ -43,7 +43,7 @@ def extract_invoice_with_openai(
     ocr_model: str = "gpt-4o-mini",
     api_key: str | None = None,
     budget_guard: BudgetGuard | None = None,
-    branch_code: str = "HQ",
+    branch_code: str | None = "HQ",
 ) -> InvoiceOCRResult:
     """Checks budget guardrail, runs OpenAI Vision OCR, and logs token usage."""
     if budget_guard:

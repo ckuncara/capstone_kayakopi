@@ -38,11 +38,43 @@ their amounts agree. A difference between two pre-GST subtotals is not caused by
 an outlet as overstaffed without an approved threshold. When asked for supplier spending by month,
 use supplier_month grouping and report excluded invoices. When asked which supplier increased prices
 most, report the largest comparable percentage change and its first/latest invoice-line evidence.
+Local uploaded-invoice tools use SQLite and ChromaDB, which are separate from the MySQL data.
+Identify the source and do not present one database's results as records from the other.
 """
 
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _repair_interrupted_tool_calls(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Supply error results for calls interrupted before their tool results were saved."""
+    repaired: list[BaseMessage] = []
+    pending: dict[str, str] = {}
+
+    def finish_pending() -> None:
+        for call_id, name in pending.items():
+            repaired.append(ToolMessage(
+                content="This tool call was interrupted; no result is available.",
+                tool_call_id=call_id,
+                name=name,
+                status="error",
+            ))
+        pending.clear()
+
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            finish_pending()
+        repaired.append(message)
+        if isinstance(message, AIMessage):
+            for call in message.tool_calls:
+                if not call["id"]:
+                    raise ValueError("A saved tool call is missing its ID.")
+                pending[call["id"]] = call["name"]
+        elif isinstance(message, ToolMessage):
+            pending.pop(message.tool_call_id, None)
+    finish_pending()
+    return repaired
 
 
 def _chat_database_path() -> Path:
@@ -69,7 +101,7 @@ def get_chatbot():
     model_with_tools = model.bind_tools(ALL_TOOLS)
 
     def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
-        messages = state["messages"]
+        messages = _repair_interrupted_tool_calls(state["messages"])
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
         

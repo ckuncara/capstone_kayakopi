@@ -65,7 +65,7 @@ class BudgetGuard:
         model: str,
         prompt_tokens: int,
         completion_tokens: int = 0,
-        branch_code: str = "HQ",
+        branch_code: str | None = "HQ",
     ) -> float:
         rates = MODEL_PRICING_PER_1M.get(model, {"input": 0.15, "output": 0.60})
         cost = (prompt_tokens * rates["input"] + completion_tokens * rates["output"]) / 1_000_000

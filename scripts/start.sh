@@ -15,6 +15,9 @@ set -a
 source .env
 set +a
 
+export KAYA_DOCKER_UID="${KAYA_DOCKER_UID:-$(id -u)}"
+export KAYA_DOCKER_GID="${KAYA_DOCKER_GID:-$(id -g)}"
+
 docker compose up -d mysql
 mysql_command=(docker compose exec -T -e "MYSQL_PWD=$KAYA_DB_ROOT_PASSWORD" mysql mysql -uroot)
 loaded=0
