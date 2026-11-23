@@ -21,3 +21,20 @@
 | 18 Nov | **(teammate Q5) Missing outlet summaries:** daily-summary files exist for 8 outlets; master lists 12. Are summaries for ORC-01, VIV-01, JEM-01, PGL-01 missing (provide) or intentionally absent (exclude)? | **18 Nov (client, pt 4):** "**Intentional**, in the sense that the **four mall stalls have never kept their own sheets.** Their takings go through the **malls' systems for rent reporting and we do not have an export.** For **ORC-01, VIV-01, JEM-01 and PGL-01 the POS table is all there is**; say so when a question about them depends on it." | 4 mall stalls (ORC/VIV/JEM/PGL) have **no summaries** — for these, `pos_transactions` is the only source; state that limitation whenever a finding depends on it |
 | 18 Nov | **(teammate Q10) Metric definitions** across the 4 summary schema variants: "Total Sales" vs "sales$" vs "REVENUE" vs "Gross Takings" (GST/discounts/refunds/platform fees?) and "No of Cups" vs "txns" vs "CUPS" vs "Customer Count" — same thing? | **18 Nov (client, pt 10):** "Same measures, different managers. **Total Sales, sales$, REVENUE and Gross Takings are all the day's gross takings, GST included, after refunds**, which are negligible; we have **no delivery platforms and no fees.** **No of Cups, txns, CUPS and Customer Count are all the number of receipts for the day; 'cups' is kopitiam habit, it counts receipts, not drinks**." | All 4 sales columns = gross takings (GST-incl, net of refunds, no platform fees); all 4 count columns = **receipt count**; "cups" = receipts, not drinks → the 4 schema variants unify 1:1 |
 | 18 Nov | **(teammate Q11) WASTAGE_KG** (only in BDK-01 & WDL-01): total outlet wastage, ingredient-only, or product-specific? Should the other 6 outlets have it? Needed for "worst wastage" comparison. | **18 Nov (client, pt 11):** "Total weight of **food thrown out at the outlet that day, everything in the bin, not product-specific.** Only **Faridah at Bedok and the Woodlands manager weigh theirs.** The other outlets **do not record wastage at all**, so for them the honest answer is that we do not have the number; **the WhatsApp export is the only other evidence**." | WASTAGE_KG = daily outlet-wide bin weight (not product-specific); **only BDK-01 & WDL-01 have it** — like-for-like comparison across these two only; other outlets = "no data" (do NOT impute); WhatsApp export = supporting evidence only |
+
+## Q14–Q23 — Copilot guardrail policy (raised by team, 20 Nov 2026)
+
+Status: **pending — awaiting client reply** (drafted for the existing email thread, 20 Nov 2026)
+
+| Q | Question | Answer |
+|---|----------|--------|
+| Q14 | Who is authorized to use the copilot? | *pending* |
+| Q15 | May users retrieve messages from named email/WhatsApp authors, or must individuals be anonymized? | *pending* |
+| Q16 | May the copilot show complete messages, or only relevant redacted excerpts? | *pending* |
+| Q17 | Which information must never be displayed (e.g. personal phone numbers, personal email addresses, home addresses, identity numbers, handwritten names)? | *pending* |
+| Q18 | Are supplier company names, business addresses and GST registration numbers permitted business information? | *pending* |
+| Q19 | Should finance managers, operations staff and outlet managers have different access levels? | *pending* |
+| Q20 | Should the copilot refuse bulk exports of messages, documents or personal information? | *pending* |
+| Q21 | May prompts, answers and retrieved evidence be stored in operational traces? If so, what retention period and redaction rules apply? | *pending* |
+| Q22 | Apart from personal-data requests, are there other question categories the copilot must always refuse? | *pending* |
+| Q23 | Confirm the copilot must not modify records, place orders, send messages or perform other external actions (read-only)? | *pending* |
