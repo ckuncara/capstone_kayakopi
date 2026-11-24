@@ -17,7 +17,6 @@ from kaya_kopi.ingestion.parsers import invoice_ocr_openai as pipeline
 from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.parsers.invoice import write_csv
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import InvoiceOCRResult
-from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens
 from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
@@ -70,13 +69,11 @@ def ocr_other_image(
             ),
         ]
     )
-    usage = getattr(response, "usage_metadata", None) or {}
-    budget.log_usage(
+    budget.log_response(
         thread_id=f"ocr_vision:{file_hash}",
         prompt="Transcribe the image text.",
-        model_name=(getattr(response, "response_metadata", None) or {}).get("model_name") or cfg.ocr_model,
-        input_tokens=usage.get("input_tokens", 1200),
-        output_tokens=usage.get("output_tokens", estimate_tokens(str(response.content))),
+        response=response,
+        requested_model=cfg.ocr_model,
     )
     if not isinstance(response.content, str):
         raise ValueError(f"OpenAI returned non-text OCR output for {source}")

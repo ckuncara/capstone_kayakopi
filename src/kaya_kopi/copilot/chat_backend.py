@@ -9,6 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Iterator, TypedDict
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
@@ -210,19 +211,18 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
     import streamlit as st
 
     config = {"configurable": {"thread_id": thread_id}}
+    turn_id = str(uuid4())
     
     # Get the shared tracker from Streamlit session state (llm_usage_tracker.py, llm_ui_components.py)
     if "usage_tracker" not in st.session_state:
         st.session_state.usage_tracker = LLMUsageTracker()
-    tracker = st.session_state.usage_tracker
+    tracker = st.session_state["usage_tracker"]
     model_name = os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
     
     # Stream with stream_mode="updates" to capture token data
     # In "updates" mode, we get deltas like {"chat": state} or {"tools": state}
-    tokens_logged = False
-    
     for update in get_chatbot().stream(
-        {"messages": [HumanMessage(content=message)]},
+        {"messages": [HumanMessage(content=message, id=turn_id)]},
         config=config,
         stream_mode="updates",
     ):
@@ -232,18 +232,10 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
                 messages = node_state["messages"]
                 if messages:
                     for msg in messages:
-                        # Log tokens from the first AIMessage we encounter (after initial prompt)
-                        if isinstance(msg, AIMessage) and not tokens_logged:
-                            if hasattr(msg, 'usage_metadata') and msg.usage_metadata:
-                                usage_meta = msg.usage_metadata
-                                if isinstance(usage_meta, dict):
-                                    input_tokens = usage_meta.get('input_tokens', 0)
-                                    output_tokens = usage_meta.get('output_tokens', 0)
-                                    
-                                    # Log if we have tokens (llm_usage_tracker.py)
-                                    if input_tokens > 0 or output_tokens > 0:
-                                        tracker.log_usage(thread_id, message, model_name, input_tokens, output_tokens)
-                                        tokens_logged = True
+                        if isinstance(msg, AIMessage):
+                            tracker.log_response(
+                                thread_id, message, msg, model_name, turn_id=turn_id,
+                            )
                         
                         # Yield every message for the UI to handle
-                        yield (msg, {})
+                        yield (msg, {"turn_id": turn_id})

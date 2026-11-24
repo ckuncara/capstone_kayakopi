@@ -448,7 +448,8 @@ class SQLiteOpsRepository:
         return "data/images/supplier_invoices/supplier_invoices_audited.csv"
 
     def log_chat(
-        self, branch_code: str | None, redacted_q: str, redacted_a: str, tools_used: str, cost_usd: float
+        self, branch_code: str | None, redacted_q: str, redacted_a: str,
+        tools_used: str, cost_usd: float | None,
     ) -> None:
         with self._connect() as conn:
             conn.execute(

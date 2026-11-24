@@ -3,7 +3,6 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens
 from kaya_kopi.security.budget_guard import BudgetGuard
 
 TOLERANCE = 0.02
@@ -79,15 +78,11 @@ def extract_invoice_with_openai(
 
     if budget_guard:
         raw_message = response["raw"]
-        usage = raw_message.usage_metadata or {}
-        budget_guard.log_usage(
+        budget_guard.log_response(
             thread_id=f"ocr_vision:{branch_code}" if branch_code else "ocr_vision",
             prompt="Extract all structured fields and Markdown OCR text.",
-            model_name=raw_message.response_metadata.get("model_name") or model_used,
-            input_tokens=usage.get("input_tokens", 1200),
-            output_tokens=usage.get(
-                "output_tokens", estimate_tokens(result.model_dump_json()) if result else 0
-            ),
+            response=raw_message,
+            requested_model=model_used,
         )
 
     if response["parsing_error"]:

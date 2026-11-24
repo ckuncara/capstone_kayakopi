@@ -47,9 +47,7 @@ class SharedChromaRepository:
             thread_id=thread_id,
             prompt=prompt,
             model_name=getattr(response, "model", None) or model_name,
-            input_tokens=input_tokens if input_tokens is not None else sum(
-                estimate_tokens(text) for text in texts
-            ),
+            input_tokens=input_tokens,
             output_tokens=0,
         )
         return [entry.embedding for entry in sorted(response.data, key=lambda entry: entry.index)]

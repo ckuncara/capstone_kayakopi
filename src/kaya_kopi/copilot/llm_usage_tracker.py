@@ -3,27 +3,46 @@
 from __future__ import annotations
 
 import os
+import json
+import logging
+import math
 import sqlite3
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TypedDict
 
 from dotenv import load_dotenv
+from langchain_core.messages import AIMessage
 
 from kaya_kopi.paths import project_root
 
 
-# Token pricing per model (USD per 1K tokens)
+# Standard USD per 1M tokens; review against the provider before changing rates.
+# https://developers.openai.com/api/docs/pricing (checked 2026-11-24)
+PRICING_VERSION = "openai-standard-2026-11-24"
 MODEL_PRICING = {
-    "gpt-4o": {"input": 0.0025, "output": 0.01},
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
-    "gpt-4-turbo": {"input": 0.01, "output": 0.03},
-    "gpt-4": {"input": 0.03, "output": 0.06},
-    "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
-    "text-embedding-3-small": {"input": 0.00002, "output": 0.0},
-    "text-embedding-3-large": {"input": 0.00013, "output": 0.0},
+    "gpt-4o": {"input": "2.50", "cached_input": "1.25", "output": "10"},
+    "gpt-4o-mini": {"input": "0.15", "cached_input": "0.075", "output": "0.60"},
+    "text-embedding-3-small": {"input": "0.02", "cached_input": "0.02", "output": "0"},
+    "text-embedding-3-large": {"input": "0.13", "cached_input": "0.13", "output": "0"},
 }
+MODEL_ALIASES = {
+    "gpt-4o-mini-2024-07-18": "gpt-4o-mini",
+    "gpt-4o-2024-08-06": "gpt-4o",
+    "gpt-4o-2024-11-20": "gpt-4o",
+}
+logger = logging.getLogger(__name__)
 
 BUDGET_USD = 50.0
+
+
+class TurnUsageSummary(TypedDict):
+    models: list[str]
+    input_tokens: int | None
+    output_tokens: int | None
+    total_tokens: int | None
+    total_cost: float | None
 
 
 class LLMUsageTracker:
@@ -45,6 +64,7 @@ class LLMUsageTracker:
     def _init_db(self) -> None:
         """Initialize the SQLite database schema."""
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS llm_usage (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,16 +84,73 @@ class LLMUsageTracker:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_timestamp ON llm_usage(timestamp DESC)
             """)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_usage)")}
+            for name, definition in {
+                "cached_input_tokens": "INTEGER",
+                "reasoning_tokens": "INTEGER",
+                "usage_source": "TEXT NOT NULL DEFAULT 'legacy'",
+                "usage_details_json": "TEXT",
+                "response_id": "TEXT",
+                "requested_model": "TEXT",
+                "service_tier": "TEXT",
+                "pricing_version": "TEXT",
+                "cost_status": "TEXT NOT NULL DEFAULT 'legacy_estimate'",
+                "turn_id": "TEXT",
+            }.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE llm_usage ADD COLUMN {name} {definition}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_usage_turn ON llm_usage(thread_id, turn_id)"
+            )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS billing_reconciliations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    provider_cost_usd REAL NOT NULL,
+                    scope TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
             conn.commit()
+
+    def log_response(
+        self, thread_id: str, prompt: str, response: AIMessage, requested_model: str,
+        *, turn_id: str | None = None,
+    ) -> float | None:
+        """Record provider usage without substituting guessed token counts."""
+        usage = response.usage_metadata or {}
+        metadata = getattr(response, "response_metadata", None) or {}
+        return self.log_usage(
+            thread_id, prompt, metadata.get("model_name") or requested_model,
+            usage.get("input_tokens"), usage.get("output_tokens"),
+            cached_input_tokens=usage.get("input_token_details", {}).get("cache_read", 0),
+            reasoning_tokens=usage.get("output_token_details", {}).get("reasoning", 0),
+            usage_source="provider" if usage else "missing",
+            usage_details_json=json.dumps(usage),
+            response_id=getattr(response, "id", None),
+            requested_model=requested_model,
+            service_tier=metadata.get("service_tier") or "default",
+            turn_id=turn_id,
+        )
 
     def log_usage(
         self,
         thread_id: str,
         prompt: str,
         model_name: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> float:
+        input_tokens: int | None,
+        output_tokens: int | None,
+        *,
+        cached_input_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        usage_source: str = "provider",
+        usage_details_json: str | None = None,
+        response_id: str | None = None,
+        requested_model: str | None = None,
+        service_tier: str = "default",
+        turn_id: str | None = None,
+    ) -> float | None:
         """
         Log LLM usage and return the total cost.
         
@@ -85,32 +162,145 @@ class LLMUsageTracker:
             output_tokens: Number of output tokens
             
         Returns:
-            Total cost in USD for this usage
+            Estimated USD cost, or None when usage or applicable pricing is unavailable.
         """
-        # Get pricing for the model
-        pricing = MODEL_PRICING.get(model_name, MODEL_PRICING["gpt-4o-mini"])
-        
-        # Calculate costs
-        input_cost = (input_tokens / 1000) * pricing["input"]
-        output_cost = (output_tokens / 1000) * pricing["output"]
-        total_cost = input_cost + output_cost
-        total_tokens = input_tokens + output_tokens
+        for value in (input_tokens, output_tokens, cached_input_tokens, reasoning_tokens):
+            if value is not None and (not isinstance(value, int) or value < 0):
+                raise ValueError("Token counts must be non-negative integers.")
+        if input_tokens is not None and cached_input_tokens > input_tokens:
+            raise ValueError("Cached input cannot exceed total input tokens.")
+        if output_tokens is not None and reasoning_tokens > output_tokens:
+            raise ValueError("Reasoning tokens cannot exceed total output tokens.")
+        pricing = MODEL_PRICING.get(MODEL_ALIASES.get(model_name, model_name))
+        total_tokens = (
+            input_tokens + output_tokens
+            if input_tokens is not None and output_tokens is not None else None
+        )
+        if total_tokens is None:
+            usage_source = "missing"
+        details = json.loads(usage_details_json) if usage_details_json else {}
+        audio_tokens = (
+            details.get("input_token_details", {}).get("audio", 0)
+            + details.get("output_token_details", {}).get("audio", 0)
+        )
+        priceable = (
+            pricing is not None and total_tokens is not None
+            and service_tier in ("default", "standard") and not audio_tokens
+        )
+        input_cost = output_cost = total_cost = None
+        if priceable and pricing is not None and input_tokens is not None and output_tokens is not None:
+            input_cost = float((
+                Decimal(input_tokens - cached_input_tokens) * Decimal(pricing["input"])
+                + Decimal(cached_input_tokens) * Decimal(pricing["cached_input"])
+            ) / Decimal(1_000_000))
+            # Reasoning is already included in output_tokens; never charge it twice.
+            output_cost = float(
+                Decimal(output_tokens) * Decimal(pricing["output"]) / Decimal(1_000_000)
+            )
+            total_cost = input_cost + output_cost
+        else:
+            logger.warning("Usage saved without a price: model=%s, tier=%s, source=%s",
+                           model_name, service_tier, usage_source)
         
         # Store in database
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT INTO llm_usage (
                     thread_id, prompt, model_name, input_tokens, output_tokens,
-                    total_tokens, input_cost, output_cost, total_cost
+                    total_tokens, input_cost, output_cost, total_cost,
+                    cached_input_tokens, reasoning_tokens, usage_source, usage_details_json,
+                    response_id, requested_model, service_tier, pricing_version, cost_status,
+                    turn_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 thread_id, prompt, model_name, input_tokens, output_tokens,
-                total_tokens, input_cost, output_cost, total_cost
+                total_tokens, input_cost, output_cost, total_cost,
+                cached_input_tokens, reasoning_tokens, usage_source, usage_details_json,
+                response_id, requested_model, service_tier,
+                PRICING_VERSION if priceable else None,
+                "estimated" if priceable else "unpriced",
+                turn_id,
             ))
             conn.commit()
         
         return total_cost
+
+    def get_turn_usage(self, thread_id: str, turn_id: str) -> TurnUsageSummary | None:
+        """Sum only the model calls associated with this saved human message."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT model_name, input_tokens, output_tokens, total_tokens, total_cost
+                   FROM llm_usage WHERE thread_id=? AND turn_id=? ORDER BY id""",
+                (thread_id, turn_id),
+            ).fetchall()
+        if not rows:
+            return None
+        return {
+            "models": sorted({row["model_name"] for row in rows}),
+            "input_tokens": (
+                sum(row["input_tokens"] for row in rows)
+                if all(row["input_tokens"] is not None for row in rows) else None
+            ),
+            "output_tokens": (
+                sum(row["output_tokens"] for row in rows)
+                if all(row["output_tokens"] is not None for row in rows) else None
+            ),
+            "total_tokens": (
+                sum(row["total_tokens"] for row in rows)
+                if all(row["total_tokens"] is not None for row in rows) else None
+            ),
+            "total_cost": (
+                sum(row["total_cost"] for row in rows)
+                if all(row["total_cost"] is not None for row in rows) else None
+            ),
+        }
+
+    def get_unpriced_count(self, *, current_month: bool = False) -> int:
+        where = "WHERE total_cost IS NULL"
+        if current_month:
+            where += """ AND timestamp >= datetime('now', 'start of month')
+                         AND timestamp < datetime('now', 'start of month', '+1 month')"""
+        with sqlite3.connect(self.db_path) as conn:
+            return conn.execute(f"SELECT COUNT(*) FROM llm_usage {where}").fetchone()[0]
+
+    def save_reconciliation(
+        self, start_date: date, end_date: date, provider_cost_usd: float, scope: str,
+    ) -> None:
+        """Save a manual provider total for [start_date, end_date) in UTC."""
+        if start_date >= end_date:
+            raise ValueError("End date must be after start date (exclusive, UTC).")
+        if not math.isfinite(provider_cost_usd) or provider_cost_usd < 0:
+            raise ValueError("Provider cost must be a finite non-negative USD amount.")
+        if not scope.strip():
+            raise ValueError("Describe the matching provider project/API-key scope.")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT INTO billing_reconciliations
+                   (start_date, end_date, provider_cost_usd, scope) VALUES (?, ?, ?, ?)""",
+                (start_date.isoformat(), end_date.isoformat(), provider_cost_usd, scope.strip()),
+            )
+
+    def get_latest_reconciliation(self) -> dict | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM billing_reconciliations ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            totals = conn.execute(
+                """SELECT COALESCE(SUM(total_cost), 0) AS estimated_cost,
+                          COUNT(*) AS calls, SUM(total_cost IS NULL) AS unpriced_calls,
+                          SUM(cost_status='legacy_estimate') AS legacy_calls
+                   FROM llm_usage WHERE timestamp >= ? AND timestamp < ?""",
+                (result["start_date"], result["end_date"]),
+            ).fetchone()
+            result.update(dict(totals))
+            result["difference_usd"] = result["provider_cost_usd"] - result["estimated_cost"]
+            return result
 
     def get_total_spend(self) -> float:
         """Get total spending across all usages."""
@@ -138,7 +328,7 @@ class LLMUsageTracker:
             conn.row_factory = sqlite3.Row
             result = conn.execute("""
                 SELECT * FROM llm_usage
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT 1
             """).fetchone()
             return dict(result) if result else None
@@ -148,14 +338,8 @@ class LLMUsageTracker:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             results = conn.execute("""
-                SELECT 
-                    timestamp,
-                    prompt,
-                    model_name,
-                    total_tokens,
-                    total_cost
-                FROM llm_usage
-                ORDER BY timestamp DESC
+                SELECT * FROM llm_usage
+                ORDER BY timestamp DESC, id DESC
             """).fetchall()
             return [dict(row) for row in results]
 

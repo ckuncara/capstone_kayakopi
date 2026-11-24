@@ -145,3 +145,55 @@ def test_conversation_sidebar_rename_and_delete(tmp_path, monkeypatch):
         assert chat_backend.get_thread_names() == {}
     finally:
         chat_backend.get_chatbot.cache_clear()
+
+
+def test_answer_usage_footer_sums_tool_calls_and_survives_reopening(tmp_path, monkeypatch):
+    @tool
+    def lookup_total() -> str:
+        """Return a known total."""
+        return "Total: 42"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "lookup_total", "args": {}, "id": "lookup"}],
+            response_metadata={"model_name": "gpt-4o-mini-2024-07-18"},
+            usage_metadata={"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+        ),
+        AIMessage(
+            content="The total is 42.",
+            response_metadata={"model_name": "gpt-4o-mini-2024-07-18"},
+            usage_metadata={
+                "input_tokens": 2000, "output_tokens": 200, "total_tokens": 2200,
+                "input_token_details": {"cache_read": 1000},
+            },
+        ),
+    ]
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [lookup_total])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=30).run()
+        app.chat_input[0].set_value("What is the total?").run()
+        assert not app.exception
+        expected = (
+            "Model: gpt-4o-mini-2024-07-18 | Tokens: 3,300 (3,000 input + 300 output) | "
+            "Estimated cost: $0.000555 USD"
+        )
+        assert expected in [caption.value for caption in app.caption]
+        thread_id = app.session_state["thread_id"]
+        app.run()
+        assert expected in [caption.value for caption in app.caption]
+        next(button for button in app.button if button.label == "＋ New chat").click().run()
+        app.button(key=thread_id).click().run()
+        assert not app.exception
+        assert expected in [caption.value for caption in app.caption]
+        assert model.invoke.call_count == 2
+    finally:
+        chat_backend.get_chatbot.cache_clear()

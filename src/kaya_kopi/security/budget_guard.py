@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from langchain_core.messages import AIMessage
+
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
 
 
@@ -17,6 +19,11 @@ class BudgetGuard:
         return self.usage_tracker.get_current_month_spend()
 
     def check_budget_or_raise(self) -> float:
+        if self.usage_tracker.get_unpriced_count(current_month=True):
+            raise BudgetExceededError(
+                "Monthly spend is incomplete: some API calls have no price or token usage. "
+                "Resolve missing usage/pricing before making further budget-guarded calls."
+            )
         current_spend = self.get_current_month_spend()
         if current_spend >= self.monthly_limit_usd:
             raise BudgetExceededError(
@@ -30,9 +37,14 @@ class BudgetGuard:
         thread_id: str,
         prompt: str,
         model_name: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> float:
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> float | None:
         return self.usage_tracker.log_usage(
             thread_id, prompt, model_name, input_tokens, output_tokens
         )
+
+    def log_response(
+        self, thread_id: str, prompt: str, response: AIMessage, requested_model: str,
+    ) -> float | None:
+        return self.usage_tracker.log_response(thread_id, prompt, response, requested_model)

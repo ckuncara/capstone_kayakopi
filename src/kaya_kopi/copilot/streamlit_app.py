@@ -14,7 +14,7 @@ from kaya_kopi.copilot.chat_backend import (
     delete_thread, get_chatbot, get_thread_names, rename_thread, retrieve_all_threads, stream_chat,
 )
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py, llm_ui_components.py)
-from kaya_kopi.copilot.llm_ui_components import render_spend_meter, render_usage_log_panel  # Added for LLM spend meter (llm_ui_components.py)
+from kaya_kopi.copilot.llm_ui_components import format_turn_usage, render_spend_meter, render_usage_log_panel
 
 
 st.set_page_config(page_title="Kaya Kopi Ops Copilot", page_icon="☕", layout="wide")
@@ -27,11 +27,22 @@ def _new_thread() -> str:
 def _load_history(thread_id: str) -> list[dict[str, str]]:
     state = get_chatbot().get_state({"configurable": {"thread_id": thread_id}})
     history: list[dict[str, str]] = []
+    turn_id: str | None = None
+    last_answers: dict[str, dict[str, str]] = {}
     for message in state.values.get("messages", []):
         if isinstance(message, HumanMessage):
+            turn_id = message.id
             history.append({"role": "user", "content": str(message.content)})
         elif isinstance(message, AIMessage) and message.content:
             history.append({"role": "assistant", "content": str(message.content)})
+            if turn_id:
+                last_answers[turn_id] = history[-1]
+    for saved_turn_id, answer in last_answers.items():
+        caption = format_turn_usage(
+            st.session_state.usage_tracker.get_turn_usage(thread_id, saved_turn_id)
+        )
+        if caption:
+            answer["usage_caption"] = caption
     return history
 
 
@@ -160,6 +171,8 @@ else:
     for item in st.session_state.message_history:
         with st.chat_message(item["role"]):
             st.markdown(item["content"])
+            if item.get("usage_caption"):
+                st.caption(item["usage_caption"])
 
     prompt = st.chat_input("Ask about sales, invoices, suppliers, documents, or data quality")
     if prompt:
@@ -169,10 +182,13 @@ else:
 
         with st.chat_message("assistant"):
             activity = {"status": None, "last_tool": "database tool"}
+            turn_metadata: dict[str, str] = {}
 
             def response_tokens():
                 try:
-                    for message, _metadata in stream_chat(st.session_state.thread_id, prompt):
+                    for message, metadata in stream_chat(st.session_state.thread_id, prompt):
+                        if isinstance(metadata.get("turn_id"), str):
+                            turn_metadata["turn_id"] = metadata["turn_id"]
                         if isinstance(message, ToolMessage):
                             activity["last_tool"] = message.name or "database tool"
                             result = _text_content(message.content)
@@ -202,7 +218,19 @@ else:
                     state="complete",
                     expanded=False,
                 )
+            usage_caption = None
+            if turn_metadata.get("turn_id"):
+                usage_caption = format_turn_usage(
+                    st.session_state.usage_tracker.get_turn_usage(
+                        st.session_state.thread_id, turn_metadata["turn_id"],
+                    )
+                )
+                if usage_caption:
+                    st.caption(usage_caption)
 
         if not isinstance(answer, str):
             answer = json.dumps(answer, default=str)
-        st.session_state.message_history.append({"role": "assistant", "content": answer})
+        saved_answer = {"role": "assistant", "content": answer}
+        if usage_caption:
+            saved_answer["usage_caption"] = usage_caption
+        st.session_state.message_history.append(saved_answer)
