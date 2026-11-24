@@ -15,7 +15,7 @@ from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.loader.mysql import Loader, read_csv
 from kaya_kopi.ingestion.parsers import image_ingestion_openai as pipeline
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import InvoiceOCRResult, LineItemOCR
-from kaya_kopi.ingestion.parsers.vector_chunking import build_chunks, estimate_tokens
+from kaya_kopi.ingestion.parsers.vector_chunking import build_chunks
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 from kaya_kopi.security.budget_guard import BudgetGuard
@@ -39,6 +39,11 @@ def test_embedding_records_tracker_fields(tmp_path: Path, monkeypatch):
     vectors = object.__new__(SharedChromaRepository)
     vectors.cfg = cfg
     vectors.budget_guard = guard
+    vectors.embed_fn = Mock()
+    vectors.embed_fn.client.embeddings.create.return_value = SimpleNamespace(
+        data=[SimpleNamespace(index=0, embedding=[1.0, 0.0])],
+        usage=SimpleNamespace(prompt_tokens=37), model=cfg.embed_model,
+    )
     monkeypatch.setattr(vectors, "get_collection", lambda: Mock())
     chunks = build_chunks("doc1", text="Coffee invoice", strategy="single")
 
@@ -47,8 +52,31 @@ def test_embedding_records_tracker_fields(tmp_path: Path, monkeypatch):
     assert usage["thread_id"] == "embedding:doc1"
     assert usage["prompt"] == "Embed invoice"
     assert usage["model_name"] == cfg.embed_model
-    assert usage["input_tokens"] == estimate_tokens("Coffee invoice")
+    assert usage["input_tokens"] == 37
     assert usage["output_tokens"] == 0
+
+
+def test_embedding_usage_recorded_when_chroma_upsert_fails(tmp_path: Path, monkeypatch):
+    cfg = AppConfig(sqlite_db_path=tmp_path / "ops.sqlite3", embed_model="text-embedding-3-small")
+    guard = BudgetGuard(cfg.sqlite_db_path)
+    vectors = object.__new__(SharedChromaRepository)
+    vectors.cfg = cfg
+    vectors.budget_guard = guard
+    vectors.embed_fn = Mock()
+    vectors.embed_fn.client.embeddings.create.return_value = SimpleNamespace(
+        data=[SimpleNamespace(index=0, embedding=[1.0, 0.0])],
+        usage=SimpleNamespace(prompt_tokens=37), model=cfg.embed_model,
+    )
+    collection = Mock()
+    collection.upsert.side_effect = RuntimeError("Chroma unavailable")
+    monkeypatch.setattr(vectors, "get_collection", lambda: collection)
+    chunks = build_chunks("doc1", text="Coffee invoice", strategy="single")
+
+    with pytest.raises(RuntimeError, match="Chroma unavailable"):
+        vectors.upsert_chunks("doc1", chunks, "invoice")
+
+    assert guard.usage_tracker.get_latest_usage()["input_tokens"] == 37
+    vectors.embed_fn.client.embeddings.create.assert_called_once()
 
 
 def test_full_pipeline_builds_mysql_staging_and_reuses_sqlite(tmp_path: Path, monkeypatch):
@@ -79,7 +107,9 @@ def test_full_pipeline_builds_mysql_staging_and_reuses_sqlite(tmp_path: Path, mo
     )
     extract = Mock(return_value=invoice)
     model = Mock()
-    model.invoke.return_value = SimpleNamespace(content="Other image text")
+    model.invoke.return_value = SimpleNamespace(
+        content="Other image text", usage_metadata={"input_tokens": 2300, "output_tokens": 40}
+    )
     collection = chromadb.EphemeralClient().create_collection(
         f"image_ingestion_test_{uuid4().hex}", embedding_function=FixedEmbedding()
     )
@@ -109,6 +139,8 @@ def test_full_pipeline_builds_mysql_staging_and_reuses_sqlite(tmp_path: Path, mo
     usage = BudgetGuard(cfg.sqlite_db_path).usage_tracker.get_latest_usage()
     assert usage["thread_id"].startswith("ocr_vision:")
     assert usage["prompt"] == "Transcribe the image text."
+    assert usage["input_tokens"] == 2300
+    assert usage["output_tokens"] == 40
     request = model.invoke.call_args.args[0][1].content
     assert request[1]["image_url"]["url"].startswith("data:image/png;base64,")
 

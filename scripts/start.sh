@@ -17,6 +17,7 @@ set +a
 
 export KAYA_DOCKER_UID="${KAYA_DOCKER_UID:-$(id -u)}"
 export KAYA_DOCKER_GID="${KAYA_DOCKER_GID:-$(id -g)}"
+bash ./scripts/prepare_chroma_data.sh
 
 docker compose up -d mysql
 mysql_command=(docker compose exec -T -e "MYSQL_PWD=$KAYA_DB_ROOT_PASSWORD" mysql mysql -uroot)

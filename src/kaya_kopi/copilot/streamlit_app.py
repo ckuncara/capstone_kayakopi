@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import uuid
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from kaya_kopi.copilot.chat_backend import get_chatbot, retrieve_all_threads, stream_chat
+from kaya_kopi.config import AppConfig
+from kaya_kopi.copilot.chat_backend import (
+    delete_thread, get_chatbot, get_thread_names, rename_thread, retrieve_all_threads, stream_chat,
+)
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py, llm_ui_components.py)
 from kaya_kopi.copilot.llm_ui_components import render_spend_meter, render_usage_log_panel  # Added for LLM spend meter (llm_ui_components.py)
 
@@ -54,7 +58,10 @@ if "show_usage_log" not in st.session_state:
 if "show_invoice_upload" not in st.session_state:
     st.session_state.show_invoice_upload = False
 # Initialize tracker for spend meter (llm_usage_tracker.py)
-if "usage_tracker" not in st.session_state:
+if (
+    "usage_tracker" not in st.session_state
+    or st.session_state.usage_tracker.db_path != AppConfig().sqlite_db_path
+):
     st.session_state.usage_tracker = LLMUsageTracker()
 
 st.title("☕ Kaya Kopi Ops Copilot")
@@ -87,16 +94,50 @@ else:
 
         try:
             saved_threads = retrieve_all_threads()
+            thread_names = get_thread_names() if saved_threads else {}
         except RuntimeError as error:
             st.error(str(error))
             st.stop()
 
         for index, thread_id in enumerate(saved_threads, start=1):
-            if st.button(f"Conversation {index}", key=thread_id, use_container_width=True):
-                st.session_state.thread_id = thread_id
-                st.session_state.message_history = _load_history(thread_id)
-                st.session_state.tool_log = []
-                st.rerun()
+            name = thread_names.get(thread_id, f"Conversation {index}")
+            conversation, actions = st.columns([0.82, 0.18], vertical_alignment="center")
+            with conversation:
+                if st.button(name, key=thread_id, use_container_width=True, help=name):
+                    st.session_state.thread_id = thread_id
+                    st.session_state.message_history = _load_history(thread_id)
+                    st.session_state.tool_log = []
+                    st.rerun()
+            with actions:
+                with st.popover("⋮", help=f"Manage {name}"):
+                    new_name = st.text_input(
+                        "Conversation name", value=name, max_chars=80, key=f"name_{thread_id}"
+                    )
+                    if st.button("Save name", key=f"save_{thread_id}", icon=":material/save:"):
+                        try:
+                            rename_thread(thread_id, new_name)
+                        except (ValueError, sqlite3.Error) as error:
+                            st.error(str(error))
+                        else:
+                            st.rerun()
+                    confirmed = st.checkbox(
+                        "Confirm deletion", key=f"confirm_{thread_id}",
+                        help="Usage records are retained for spend tracking.",
+                    )
+                    if st.button(
+                        "Delete", key=f"delete_{thread_id}", icon=":material/delete:",
+                        disabled=not confirmed,
+                    ):
+                        try:
+                            delete_thread(thread_id)
+                        except (ValueError, sqlite3.Error) as error:
+                            st.error(str(error))
+                        else:
+                            if st.session_state.thread_id == thread_id:
+                                st.session_state.thread_id = _new_thread()
+                                st.session_state.message_history = []
+                                st.session_state.tool_log = []
+                            st.rerun()
 
         with st.expander("Tool activity", expanded=False):
             if not st.session_state.tool_log:

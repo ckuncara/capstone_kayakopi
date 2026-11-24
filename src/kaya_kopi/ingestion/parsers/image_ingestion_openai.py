@@ -70,15 +70,16 @@ def ocr_other_image(
             ),
         ]
     )
-    if not isinstance(response.content, str):
-        raise ValueError(f"OpenAI returned non-text OCR output for {source}")
+    usage = getattr(response, "usage_metadata", None) or {}
     budget.log_usage(
         thread_id=f"ocr_vision:{file_hash}",
         prompt="Transcribe the image text.",
-        model_name=cfg.ocr_model,
-        input_tokens=1200,
-        output_tokens=estimate_tokens(response.content),
+        model_name=(getattr(response, "response_metadata", None) or {}).get("model_name") or cfg.ocr_model,
+        input_tokens=usage.get("input_tokens", 1200),
+        output_tokens=usage.get("output_tokens", estimate_tokens(str(response.content))),
     )
+    if not isinstance(response.content, str):
+        raise ValueError(f"OpenAI returned non-text OCR output for {source}")
     with Image.open(source) as image:
         width, height = image.size
     sidecar.parent.mkdir(parents=True, exist_ok=True)

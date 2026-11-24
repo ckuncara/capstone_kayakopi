@@ -9,6 +9,7 @@ from streamlit.testing.v1 import AppTest
 from kaya_kopi.config import AppConfig
 from kaya_kopi.copilot import chat_backend
 from kaya_kopi.copilot import invoice_upload
+from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
     InvoiceOCRResult, LineItemOCR, validate_invoice_calculations,
 )
@@ -67,6 +68,64 @@ def test_upload_stores_local_invoice_indexes_and_syncs(upload_context):
     assert isinstance(skipped, invoice_upload.SkippedInvoice)
     assert "image is already stored" in skipped.reason
     assert extract.call_count == 1
+
+
+def test_force_upload_reprocesses_existing_image(upload_context):
+    cfg, repo, budget, vectors, extract, sync, raw = upload_context
+    invoice_upload.upload_invoice(raw, cfg, repo, vectors, budget)
+    upload_id = pending_syncs(repo)[0]["upload_id"]
+
+    result = invoice_upload.upload_invoice(raw, cfg, repo, vectors, budget, force=True)
+
+    assert isinstance(result, invoice_upload.InvoiceUploadResult)
+    assert extract.call_count == 2
+    assert len(repo.get_all_invoices()) == 1
+    assert vectors.ingest_document.call_count == 2
+    assert sync.call_args.args[1] == upload_id
+
+
+def test_force_upload_replaces_duplicate_invoice_number_and_retries_cleanup(upload_context):
+    cfg, repo, budget, vectors, extract, sync, raw = upload_context
+    invoice_upload.upload_invoice(raw, cfg, repo, vectors, budget)
+    old_hash = repo.compute_hash(raw)
+    upload_id = pending_syncs(repo)[0]["upload_id"]
+    extract.return_value.invoice_number = "inv-test"
+    different = io.BytesIO()
+    Image.new("RGB", (4, 4), "blue").save(different, format="PNG")
+    new_raw = different.getvalue()
+    new_hash = repo.compute_hash(new_raw)
+    vectors.delete_invoice_document.side_effect = [RuntimeError("Chroma unavailable"), None]
+
+    with pytest.raises(RuntimeError, match="Chroma unavailable"):
+        invoice_upload.upload_invoice(new_raw, cfg, repo, vectors, budget, force=True)
+
+    pending = pending_syncs(repo)
+    assert len(pending) == 1
+    assert pending[0]["upload_id"] == upload_id
+    assert pending[0]["file_hash"] == new_hash
+    invoice_upload.retry_invoice_upload(repo, vectors, upload_id, new_hash)
+    assert len(repo.get_all_invoices()) == 1
+    assert repo.get_invoice_by_hash(new_hash)["invoice_number"] == "inv-test"
+    assert vectors.delete_invoice_document.call_args_list == [((old_hash,),), ((old_hash,),)]
+    assert sync.call_args.args[1] == upload_id
+
+
+def test_force_upload_rejects_conflicting_supplier(upload_context):
+    cfg, repo, budget, vectors, extract, sync, raw = upload_context
+    invoice_upload.upload_invoice(raw, cfg, repo, vectors, budget)
+    original_hash = repo.compute_hash(raw)
+    upload_id = pending_syncs(repo)[0]["upload_id"]
+    extract.return_value.vendor_name = "Different supplier"
+    different = io.BytesIO()
+    Image.new("RGB", (4, 4), "blue").save(different, format="PNG")
+
+    with pytest.raises(ValueError, match="identity changed"):
+        invoice_upload.upload_invoice(different.getvalue(), cfg, repo, vectors, budget, force=True)
+
+    assert repo.get_invoice_by_hash(original_hash)["vendor_name"] == "Supplier"
+    assert pending_syncs(repo)[0]["upload_id"] == upload_id
+    assert sync.call_count == 1
+    vectors.delete_invoice_document.assert_not_called()
 
 
 def test_chroma_failure_stays_pending_and_retry_does_not_repeat_ocr(upload_context):
@@ -143,11 +202,15 @@ def test_existing_image_is_not_overwritten(upload_context):
 def test_upload_page_navigation_preserves_chat(upload_context, tmp_path: Path, monkeypatch):
     cfg, _, _, _, _, _, _ = upload_context
     monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(cfg.sqlite_db_path))
     monkeypatch.setattr(invoice_upload, "AppConfig", lambda: cfg)
     monkeypatch.setattr(chat_backend, "retrieve_all_threads", lambda: [])
     app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
     app = AppTest.from_file(str(app_path), default_timeout=30).run()
     assert not app.exception
+    app.session_state["usage_tracker"] = LLMUsageTracker(db_path=tmp_path / "old-usage.sqlite3")
+    app.run()
+    assert app.session_state["usage_tracker"].db_path == cfg.sqlite_db_path
 
     next(button for button in app.button if button.label == "Upload supplier invoices").click().run()
     assert not app.exception
@@ -159,11 +222,13 @@ def test_upload_page_navigation_preserves_chat(upload_context, tmp_path: Path, m
     assert any(button.label == "Upload supplier invoices" for button in app.button)
 
 
-def test_upload_page_skips_duplicates_and_continues_batch(upload_context, monkeypatch):
+@pytest.mark.parametrize("force", [False, True])
+def test_upload_page_skips_duplicates_and_continues_batch(upload_context, monkeypatch, force):
     cfg, repo, budget, vectors, _, _, raw = upload_context
     st = MagicMock()
     st.session_state = {}
     st.button.side_effect = lambda label, **kwargs: label == "Run OCR and save invoices"
+    st.checkbox.return_value = force
     first = Mock(name="first")
     first.name = "existing.png"
     first.getvalue.return_value = raw
@@ -193,4 +258,5 @@ def test_upload_page_skips_duplicates_and_continues_batch(upload_context, monkey
     st.error.assert_not_called()
     st.exception.assert_not_called()
     assert process.call_count == 2
+    assert all(call.kwargs["force"] is force for call in process.call_args_list)
     assert any("INV-NEW" in call.args[0] for call in st.success.call_args_list)

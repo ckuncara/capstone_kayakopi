@@ -20,6 +20,7 @@ credential_pattern='^[A-Za-z0-9_.@%+-]+$'
 
 export KAYA_DOCKER_UID="${KAYA_DOCKER_UID:-$(id -u)}"
 export KAYA_DOCKER_GID="${KAYA_DOCKER_GID:-$(id -g)}"
+bash ./scripts/prepare_chroma_data.sh
 mkdir -p runtime/ocr runtime/structured
 
 docker compose up -d mysql

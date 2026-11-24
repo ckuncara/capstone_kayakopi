@@ -308,6 +308,35 @@ class OCRMySQLSyncTest(unittest.TestCase):
                WHERE s.upload_id=%s""",
             (row["upload_id"],),
         )), 2)
+        replacement = io.BytesIO()
+        Image.new("RGB", (4, 4), "blue").save(replacement, format="PNG")
+        replacement_raw = replacement.getvalue()
+        self.invoice.raw_markdown_text = "updated invoice"
+        self.invoice.invoice_number = self.number.lower()
+        with patch(
+            "kaya_kopi.copilot.invoice_upload.extract_invoice_with_openai",
+            return_value=self.invoice,
+        ):
+            replaced = upload_invoice(
+                replacement_raw, self.repo.cfg, self.repo, vectors,
+                BudgetGuard(self.repo.cfg.sqlite_db_path), force=True,
+            )
+        self.assertIsInstance(replaced, InvoiceUploadResult)
+        replacement_hash = self.repo.compute_hash(replacement_raw)
+        self.assertFalse(self.repo.hash_exists(file_hash))
+        self.assertTrue(self.repo.hash_exists(replacement_hash))
+        self.assertEqual(collection.get(ids=[file_hash])["ids"], [])
+        self.assertEqual(collection.get(ids=[replacement_hash])["ids"], [replacement_hash])
+        self.assertEqual(pending_syncs(self.repo), [])
+        updated = self.query(
+            """SELECT i.supplier_invoice_id, d.raw_text, s.upload_id
+               FROM supplier_invoice i
+               JOIN source_document d ON d.source_document_id=i.source_document_id
+               JOIN ocr_invoice_sync s ON s.supplier_invoice_id=i.supplier_invoice_id
+               WHERE s.upload_id=%s""", (row["upload_id"],),
+        )[0]
+        self.assertEqual(updated["supplier_invoice_id"], row["supplier_invoice_id"])
+        self.assertEqual(updated["raw_text"], "updated invoice")
 
     def test_fixed_invoice_removes_obsolete_upload_quality_issues(self):
         self.invoice.line_items[0].line_total = 111

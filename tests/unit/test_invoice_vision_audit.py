@@ -1,6 +1,7 @@
 from pathlib import Path
 import sqlite3
 from unittest.mock import Mock
+from langchain_core.messages import AIMessage
 from kaya_kopi.config import AppConfig
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
 from kaya_kopi.ingestion.parsers import invoice_vision_audit
@@ -133,10 +134,30 @@ def test_tracker_current_month_spend(tmp_path: Path):
     assert tracker.get_total_spend() == pytest.approx(11.2)
 
 
+def test_usage_panel_budget_matches_current_month(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MONTHLY_BUDGET_USD", "10")
+    tracker = LLMUsageTracker(db_path=tmp_path / "usage.sqlite3")
+    with sqlite3.connect(tracker.db_path) as conn:
+        conn.execute("INSERT INTO llm_usage (timestamp, total_cost) VALUES (datetime('now'), 2)")
+        conn.execute(
+            "INSERT INTO llm_usage (timestamp, total_cost) "
+            "VALUES (datetime('now', 'start of month', '-1 second'), 5)"
+        )
+    assert tracker.get_budget_info() == {
+        "total_budget": 10.0, "total_spent": 2.0, "budget_left": 8.0, "percentage_used": 20.0,
+    }
+
+
 def test_invoice_ocr_logs_tracker_fields(tmp_path: Path, monkeypatch):
     invoice = _sample_invoice()
     model = Mock()
-    model.with_structured_output.return_value.invoke.return_value = invoice
+    model.with_structured_output.return_value.invoke.return_value = {
+        "raw": AIMessage(content="", usage_metadata={
+            "input_tokens": 1750, "output_tokens": 350, "total_tokens": 2100,
+        }),
+        "parsed": invoice,
+        "parsing_error": None,
+    }
     monkeypatch.setattr(invoice_vision_audit, "ChatOpenAI", Mock(return_value=model))
     guard = BudgetGuard(tmp_path / "usage.sqlite3")
 
@@ -145,8 +166,27 @@ def test_invoice_ocr_logs_tracker_fields(tmp_path: Path, monkeypatch):
     usage = guard.usage_tracker.get_latest_usage()
     assert usage["thread_id"] == "ocr_vision:AMK-01"
     assert usage["model_name"] == "gpt-4o-mini"
-    assert usage["input_tokens"] == 1200
-    assert usage["output_tokens"] > 0
+    assert usage["input_tokens"] == 1750
+    assert usage["output_tokens"] == 350
+    model.with_structured_output.assert_called_once_with(InvoiceOCRResult, include_raw=True)
+
+
+def test_invoice_ocr_logs_usage_before_reporting_parse_failure(tmp_path: Path, monkeypatch):
+    model = Mock()
+    model.with_structured_output.return_value.invoke.return_value = {
+        "raw": AIMessage(content="", usage_metadata={
+            "input_tokens": 1750, "output_tokens": 350, "total_tokens": 2100,
+        }),
+        "parsed": None,
+        "parsing_error": ValueError("Invalid output"),
+    }
+    monkeypatch.setattr(invoice_vision_audit, "ChatOpenAI", Mock(return_value=model))
+    guard = BudgetGuard(tmp_path / "usage.sqlite3")
+
+    with pytest.raises(ValueError, match="Invalid output"):
+        invoice_vision_audit.extract_invoice_with_openai(b"image", budget_guard=guard)
+
+    assert guard.usage_tracker.get_latest_usage()["total_tokens"] == 2100
 
 
 def test_vector_chunking_strategies():

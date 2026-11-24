@@ -56,7 +56,7 @@ def extract_invoice_with_openai(
         model=model_used,
         temperature=0.0,
         api_key=api_key or None,
-    ).with_structured_output(InvoiceOCRResult)
+    ).with_structured_output(InvoiceOCRResult, include_raw=True)
 
     messages = [
         SystemMessage(
@@ -74,19 +74,26 @@ def extract_invoice_with_openai(
             ]
         ),
     ]
-    result: InvoiceOCRResult = llm.invoke(messages)
+    response = llm.invoke(messages)
+    result = response["parsed"]
 
     if budget_guard:
-        # Image vision prompt (~1200 tokens) + output tokens
-        out_tokens = estimate_tokens(result.model_dump_json())
+        raw_message = response["raw"]
+        usage = raw_message.usage_metadata or {}
         budget_guard.log_usage(
             thread_id=f"ocr_vision:{branch_code}" if branch_code else "ocr_vision",
             prompt="Extract all structured fields and Markdown OCR text.",
-            model_name=model_used,
-            input_tokens=1200,
-            output_tokens=out_tokens,
+            model_name=raw_message.response_metadata.get("model_name") or model_used,
+            input_tokens=usage.get("input_tokens", 1200),
+            output_tokens=usage.get(
+                "output_tokens", estimate_tokens(result.model_dump_json()) if result else 0
+            ),
         )
 
+    if response["parsing_error"]:
+        raise response["parsing_error"]
+    if not isinstance(result, InvoiceOCRResult):
+        raise ValueError("OpenAI did not return a parsed invoice.")
     return result
 
 

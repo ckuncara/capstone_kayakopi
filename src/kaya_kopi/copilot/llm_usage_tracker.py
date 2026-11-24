@@ -34,7 +34,9 @@ class LLMUsageTracker:
         load_dotenv(project_root() / ".env")
         
         if db_path is None:
-            db_path = Path(os.getenv("KAYA_CHAT_DB", ".kaya_chat.sqlite3")).parent / "llm_usage.sqlite3"
+            from kaya_kopi.config import AppConfig
+
+            db_path = AppConfig().sqlite_db_path
         
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -123,7 +125,7 @@ class LLMUsageTracker:
         with sqlite3.connect(self.db_path) as conn:
             result = conn.execute(
                 """
-                SELECT COALESCE(SUM(total_cost), 0.0) FROM llm_usage
+                SELECT COALESCE(SUM(total_cost), 0.00) FROM llm_usage
                 WHERE timestamp >= datetime('now', 'start of month')
                   AND timestamp < datetime('now', 'start of month', '+1 month')
                 """
@@ -163,12 +165,13 @@ class LLMUsageTracker:
 
     def get_budget_info(self) -> dict:
         """Get budget information."""
-        total_spent = self.get_total_spend()
-        budget_left = max(0, BUDGET_USD - total_spent)
-        percentage_used = (total_spent / BUDGET_USD) * 100 if BUDGET_USD > 0 else 0
+        budget = float(os.getenv("MONTHLY_BUDGET_USD", str(BUDGET_USD)))
+        total_spent = self.get_current_month_spend()
+        budget_left = max(0, budget - total_spent)
+        percentage_used = (total_spent / budget) * 100 if budget > 0 else 0
         
         return {
-            "total_budget": BUDGET_USD,
+            "total_budget": budget,
             "total_spent": total_spent,
             "budget_left": budget_left,
             "percentage_used": min(100, percentage_used),
