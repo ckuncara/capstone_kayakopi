@@ -12,6 +12,18 @@ from kaya_kopi.copilot.chat_backend import get_chatbot
 
 CASES = [
     (
+        "what's our margin on Kopi at mall outlets this quarter",
+        "Must use the current Singapore calendar quarter, resolve the four mall outlets, and explain the missing sales coverage and cost per cup without reporting a zero margin.",
+    ),
+    (
+        "Which supplier raised prices the most this year?",
+        "Must use the Singapore calendar year to date, state actual scan coverage, and cite the first and latest invoice lines for the leading comparable increase.",
+    ),
+    (
+        "Are the mall stalls over-staffed for what they sell?",
+        "Must resolve the mall outlets, show scheduled cost alongside partial POS takings for the latest roster month, and explain what is missing for a verdict.",
+    ),
+    (
         "Retrieve sales for legacy outlet code AMK-3A and explain which canonical outlet it belongs to.",
         "Must resolve AMK-3A to AMK-03, return sales, and cite the alias evidence.",
     ),

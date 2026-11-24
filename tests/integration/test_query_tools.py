@@ -50,6 +50,30 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertEqual(result["authority"], "PARTIAL_POS_EXPORT")
         self.assertGreater(sum(int(row["quantity"]) for row in result["results"]), 0)
 
+    def test_mall_kopi_margin_reports_missing_inputs_and_out_of_period_sales(self) -> None:
+        result = analyze_pos_sql.invoke({
+            "analysis": "margin", "outlet_type": "mall", "menu_item": "Kopi",
+            "start_date": "2026-10-01", "end_date": "2026-11-24",
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(result["outlet_codes"], ["JEM-01", "ORC-01", "PGL-01", "VIV-01"])
+        self.assertEqual(result["period"], {"start": "2026-10-01", "end": "2026-11-24"})
+        self.assertEqual(result["pos_coverage"]["last_observed_date"], "2026-06-30")
+        self.assertEqual(result["pos_coverage"]["status"], "NO_OBSERVATIONS")
+        self.assertIsNone(result["margin_percent"])
+        self.assertIn("approved recipe-level cost per cup for the requested period", result["missing_for_margin"])
+
+    def test_pos_outlet_type_and_codes_never_widen_an_empty_intersection(self) -> None:
+        result = analyze_pos_sql.invoke({
+            "analysis": "product_mix", "outlet_type": "mall", "outlet_codes": ["AMK-03"],
+            "start_date": "2026-06-01", "end_date": "2026-06-30",
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["results"], [])
+
     def test_analyze_suppliers_spend_uses_canonical_invoice_cost(self) -> None:
         result = analyze_suppliers_sql.invoke({"analysis": "spend", "group_by": "supplier"})
         self.assertTrue(result["ok"], result)
@@ -125,6 +149,34 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertIn("citation", largest["first_evidence"])
         self.assertIn("invoice_number", largest["latest_evidence"])
         self.assertIn("citation", largest["latest_evidence"])
+
+    def test_supplier_price_change_ranks_before_paging_and_reports_date_coverage(self) -> None:
+        arguments = {
+            "analysis": "price_change", "start_date": "2026-01-01", "end_date": "2026-11-24",
+            "detail_limit": 1,
+        }
+        first = analyze_suppliers_sql.invoke(arguments)
+        second = analyze_suppliers_sql.invoke({**arguments, "page": 2})
+
+        self.assertTrue(first["ok"], first)
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(first["period"]["end"], "2026-11-24")
+        self.assertEqual(first["observed_period"]["end"], "2026-06-28")
+        self.assertEqual(first["largest_increase"], first["results"][0])
+        self.assertEqual(first["detail_page"]["next_page"], 2)
+        self.assertEqual(first["comparable_series_count"], second["comparable_series_count"])
+        self.assertGreaterEqual(float(first["results"][0]["percent_change"]),
+                                float(second["results"][0]["percent_change"]))
+        self.assertIsNone(second["largest_increase"])
+
+    def test_supplier_price_change_distinguishes_missing_dates_from_no_increase(self) -> None:
+        result = analyze_suppliers_sql.invoke({
+            "analysis": "price_change", "start_date": "2023-01-01", "end_date": "2023-12-31",
+        })
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "NO_OBSERVATIONS")
+        self.assertIsNone(result["largest_increase"])
+        self.assertEqual(result["source_period"]["end"], "2026-06-28")
 
     def test_analyze_suppliers_reconciliation_keeps_reused_invoice_number(self) -> None:
         result = analyze_suppliers_sql.invoke(
@@ -226,16 +278,11 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertIsNone(by_outlet["JUR-01"]["total_wastage_kg"])
 
     def test_analyze_outlets_wastage_ranks_only_measured_outlets(self) -> None:
-        result = analyze_outlets_sql.invoke(
-            {
-                "analysis": "wastage",
-                "outlet_codes": [],
-                "start_date": "2025-07-01",
-                "end_date": "2026-06-30",
-            }
-        )
+        result = analyze_outlets_sql.invoke({"analysis": "wastage"})
 
         self.assertTrue(result["ok"], result)
+        self.assertTrue(result["default_period"])
+        self.assertEqual(result["period"], {"start": "2025-07-01", "end": "2026-06-30"})
         self.assertEqual(result["status"], "PARTIAL")
         self.assertFalse(result["all_outlets_comparable"])
         self.assertEqual(result["comparison_scope"], "MEASURED_OUTLETS_ONLY")
@@ -286,6 +333,30 @@ class QueryToolIntegrationTest(unittest.TestCase):
         self.assertTrue(
             all(row["productivity_comparable"] for row in result["comparable_outlets"])
         )
+
+    def test_mall_staffing_returns_partial_sales_with_latest_roster(self) -> None:
+        result = analyze_outlets_sql.invoke({"analysis": "staffing", "outlet_type": "mall"})
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["period"], {"start": "2026-06-01", "end": "2026-06-30"})
+        self.assertEqual({row["outlet_code"] for row in result["results"]},
+                         {"JEM-01", "ORC-01", "PGL-01", "VIV-01"})
+        for row in result["results"]:
+            self.assertGreater(float(row["labour_cost_sgd"]), 0)
+            self.assertGreater(float(row["observed_pos_takings_sgd"]), 0)
+            self.assertIsNone(row["gross_takings_sgd"])
+            self.assertFalse(row["productivity_comparable"])
+
+    def test_staffing_does_not_rank_an_outlet_without_roster_hours(self) -> None:
+        result = analyze_outlets_sql.invoke({
+            "analysis": "staffing", "outlet_codes": ["AMK-01"],
+            "start_date": "2026-05-01", "end_date": "2026-05-31",
+        })
+
+        self.assertTrue(result["ok"], result)
+        self.assertIsNone(result["results"][0]["labour_cost_sgd"])
+        self.assertIsNone(result["results"][0]["gross_takings_per_paid_hour_sgd"])
+        self.assertEqual(result["comparable_outlets"], [])
 
     def test_get_outlet_sales_uses_authoritative_daily_summary_when_available(self) -> None:
         result = get_outlet_sales_sql.invoke(

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Iterator, TypedDict
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
@@ -40,7 +42,33 @@ use supplier_month grouping and report excluded invoices. When asked which suppl
 most, report the largest comparable percentage change and its first/latest invoice-line evidence.
 Local uploaded-invoice tools use SQLite and ChromaDB, which are separate from the MySQL data.
 Identify the source and do not present one database's results as records from the other.
+
+Use the supplied Singapore date for relative dates. This quarter and this year start at the
+beginning of the current calendar quarter and year, respectively, and end today. Keep that
+requested period even if the source data ends earlier. No records in a period means no
+observations, not zero sales. For Kopi margin, use analyze_pos_sql with analysis="margin".
+For mall outlets, pass outlet_type="mall" and let the database resolve the outlet codes.
+Outlet-wide takings and product mix cannot establish a product margin. Report the margin
+tool's missing inputs when it returns insufficient evidence. If the tool gives a
+last_observed_date, explicitly state that the available POS records end on that date.
+
+For staffing, payroll, or overstaffing questions, call analyze_outlets_sql with analysis="staffing"
+in the same turn. Use outlet_type="mall" for mall stalls. When the user gives no date and there
+is no prior analysis to continue, omit both dates so the tool selects the latest roster month.
+Show the scheduled labour cost and observed POS takings as separate figures, with the coverage
+limitation and any missing benchmark. For undated wastage, call the same tool with analysis="wastage"
+and omit both dates. Answer from the tool result in the current turn.
+
+For MySQL analysis follow-ups, reuse the last relevant query's effective dates, supplier, item,
+and outlets unless the user changes them. Use the dates returned by the tool when it defaulted
+the period. If the user names specific outlets, use those codes. For a request to see the invoice
+evidence, start with the exact invoice numbers and line citations returned by the price query.
 """
+
+
+def _current_system_message() -> SystemMessage:
+    today = datetime.now(ZoneInfo("Asia/Singapore")).date().isoformat()
+    return SystemMessage(content=f"Today's date in Asia/Singapore is {today}.\n\n{SYSTEM_PROMPT}")
 
 
 class ChatState(TypedDict):
@@ -101,9 +129,11 @@ def get_chatbot():
     model_with_tools = model.bind_tools(ALL_TOOLS)
 
     def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
-        messages = _repair_interrupted_tool_calls(state["messages"])
-        if not messages or not isinstance(messages[0], SystemMessage):
-            messages = [SystemMessage(content=SYSTEM_PROMPT), *messages]
+        messages = [
+            message for message in _repair_interrupted_tool_calls(state["messages"])
+            if not isinstance(message, SystemMessage)
+        ]
+        messages.insert(0, _current_system_message())
         
         # Invoke model and capture response with token usage (llm_usage_tracker.py)
         response = model_with_tools.invoke(messages)
