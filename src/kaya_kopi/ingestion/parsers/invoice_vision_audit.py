@@ -80,11 +80,11 @@ def extract_invoice_with_openai(
         # Image vision prompt (~1200 tokens) + output tokens
         out_tokens = estimate_tokens(result.model_dump_json())
         budget_guard.log_usage(
-            operation="ocr_vision",
-            model=model_used,
-            prompt_tokens=1200,
-            completion_tokens=out_tokens,
-            branch_code=branch_code,
+            thread_id=f"ocr_vision:{branch_code}" if branch_code else "ocr_vision",
+            prompt="Extract all structured fields and Markdown OCR text.",
+            model_name=model_used,
+            input_tokens=1200,
+            output_tokens=out_tokens,
         )
 
     return result

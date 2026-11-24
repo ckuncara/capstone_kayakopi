@@ -232,11 +232,11 @@ def render_invoice_audit_panel() -> None:
                     )
                     ans_text = str(resp.content)
                     cost = budget.log_usage(
-                        "rag_chat",
-                        cfg.chat_model,
-                        estimate_tokens(ctx + scrubbed_q),
-                        estimate_tokens(ans_text),
-                        branch_code=None,
+                        thread_id="rag_chat",
+                        prompt=scrubbed_q,
+                        model_name=cfg.chat_model,
+                        input_tokens=estimate_tokens(ctx + scrubbed_q),
+                        output_tokens=estimate_tokens(ans_text),
                     )
                     repo.log_chat(None, scrubbed_q, ans_text, "semantic_search", cost)
                     st.markdown(ans_text)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -15,11 +14,13 @@ from kaya_kopi.paths import project_root
 
 # Token pricing per model (USD per 1K tokens)
 MODEL_PRICING = {
-    "gpt-4o": {"input": 0.005, "output": 0.015},
+    "gpt-4o": {"input": 0.0025, "output": 0.01},
     "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
     "gpt-4-turbo": {"input": 0.01, "output": 0.03},
     "gpt-4": {"input": 0.03, "output": 0.06},
     "gpt-3.5-turbo": {"input": 0.0005, "output": 0.0015},
+    "text-embedding-3-small": {"input": 0.00002, "output": 0.0},
+    "text-embedding-3-large": {"input": 0.00013, "output": 0.0},
 }
 
 BUDGET_USD = 50.0
@@ -85,7 +86,7 @@ class LLMUsageTracker:
             Total cost in USD for this usage
         """
         # Get pricing for the model
-        pricing = MODEL_PRICING.get(model_name, MODEL_PRICING.get("gpt-4o-mini"))
+        pricing = MODEL_PRICING.get(model_name, MODEL_PRICING["gpt-4o-mini"])
         
         # Calculate costs
         input_cost = (input_tokens / 1000) * pricing["input"]
@@ -116,6 +117,18 @@ class LLMUsageTracker:
                 "SELECT COALESCE(SUM(total_cost), 0) FROM llm_usage"
             ).fetchone()
             return result[0] if result else 0.0
+
+    def get_current_month_spend(self) -> float:
+        """Get spending for the current UTC month."""
+        with sqlite3.connect(self.db_path) as conn:
+            result = conn.execute(
+                """
+                SELECT COALESCE(SUM(total_cost), 0.0) FROM llm_usage
+                WHERE timestamp >= datetime('now', 'start of month')
+                  AND timestamp < datetime('now', 'start of month', '+1 month')
+                """
+            ).fetchone()
+            return float(result[0]) if result else 0.0
 
     def get_latest_usage(self) -> Optional[dict]:
         """Get the most recent usage entry."""

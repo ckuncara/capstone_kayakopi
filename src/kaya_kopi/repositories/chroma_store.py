@@ -81,11 +81,11 @@ class SharedChromaRepository:
 
         if self.budget_guard:
             self.budget_guard.log_usage(
-                operation="embedding",
-                model=self.cfg.embed_model,
-                prompt_tokens=total_tokens,
-                completion_tokens=0,
-                branch_code=branch_code,
+                thread_id=f"embedding:{parent_doc_id}",
+                prompt=f"Embed {source_type}",
+                model_name=self.cfg.embed_model or "text-embedding-3-small",
+                input_tokens=total_tokens,
+                output_tokens=0,
             )
         return len(chunks)
 

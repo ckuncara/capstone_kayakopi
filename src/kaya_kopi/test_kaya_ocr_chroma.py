@@ -250,11 +250,11 @@ with tab_chat:
                         answer = str(response.content)
 
                         cost = budget.log_usage(
-                            operation="rag_chat_test",
-                            model=cfg.chat_model,
-                            prompt_tokens=estimate_tokens(context_str + scrubbed_q),
-                            completion_tokens=estimate_tokens(answer),
-                            branch_code=branch_code,
+                            thread_id=f"rag_chat_test:{branch_code}",
+                            prompt=scrubbed_q,
+                            model_name=cfg.chat_model,
+                            input_tokens=estimate_tokens(context_str + scrubbed_q),
+                            output_tokens=estimate_tokens(answer),
                         )
                         sql_repo.log_chat(branch_code, scrubbed_q, answer, "semantic_search", cost)
 

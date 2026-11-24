@@ -73,11 +73,11 @@ def ocr_other_image(
     if not isinstance(response.content, str):
         raise ValueError(f"OpenAI returned non-text OCR output for {source}")
     budget.log_usage(
-        operation="ocr_vision",
-        model=cfg.ocr_model,
-        prompt_tokens=1200,
-        completion_tokens=estimate_tokens(response.content),
-        branch_code=None,
+        thread_id=f"ocr_vision:{file_hash}",
+        prompt="Transcribe the image text.",
+        model_name=cfg.ocr_model,
+        input_tokens=1200,
+        output_tokens=estimate_tokens(response.content),
     )
     with Image.open(source) as image:
         width, height = image.size

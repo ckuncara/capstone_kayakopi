@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Iterator, TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.messages import BaseMessage, SystemMessage, AIMessage
+from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph

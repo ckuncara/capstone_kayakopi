@@ -1,5 +1,9 @@
 from pathlib import Path
+import sqlite3
+from unittest.mock import Mock
 from kaya_kopi.config import AppConfig
+from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
+from kaya_kopi.ingestion.parsers import invoice_vision_audit
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
     InvoiceOCRResult,
     LineItemOCR,
@@ -73,9 +77,76 @@ def test_budget_circuit_breaker(tmp_path: Path):
     db_path = tmp_path / "budget_test.db"
     guard = BudgetGuard(db_path, monthly_limit_usd=0.01)
     assert guard.check_budget_or_raise() == 0.0
-    guard.log_usage("ocr_vision", "gpt-4o-mini", prompt_tokens=100_000, completion_tokens=10_000)
+    guard.log_usage("ocr_vision", "Invoice OCR", "gpt-4o-mini", 100_000, 10_000)
+    usage = guard.usage_tracker.get_latest_usage()
+    assert usage["thread_id"] == "ocr_vision"
+    assert usage["prompt"] == "Invoice OCR"
+    assert usage["total_tokens"] == 110_000
     with pytest.raises(BudgetExceededError):
         guard.check_budget_or_raise()
+
+
+def test_tracker_and_budget_share_database(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "usage.sqlite3"
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(db_path))
+    tracker = LLMUsageTracker()
+    guard = BudgetGuard(db_path, monthly_limit_usd=1.0)
+    cost = guard.log_usage("embedding:doc", "Embed invoice", "text-embedding-3-small", 1000, 0)
+    assert cost == pytest.approx(0.00002)
+    assert guard.get_current_month_spend() == pytest.approx(cost)
+    assert tracker.get_latest_usage()["thread_id"] == "embedding:doc"
+
+
+def test_monthly_spend_uses_tracker_and_excludes_other_months(tmp_path: Path):
+    guard = BudgetGuard(tmp_path / "usage.sqlite3")
+    with sqlite3.connect(guard.sqlite_path) as conn:
+        conn.execute("INSERT INTO llm_usage (timestamp, total_cost) VALUES (datetime('now'), 0.2)")
+        conn.execute(
+            "INSERT INTO llm_usage (timestamp, total_cost) "
+            "VALUES (datetime('now', 'start of month', '-1 second'), 5.0)"
+        )
+        conn.execute("CREATE TABLE api_usage_logs (cost_usd REAL)")
+        conn.execute("INSERT INTO api_usage_logs (cost_usd) VALUES (0.3)")
+    guard.usage_tracker.get_current_month_spend = Mock(
+        wraps=guard.usage_tracker.get_current_month_spend
+    )
+
+    assert guard.get_current_month_spend() == pytest.approx(0.2)
+    guard.usage_tracker.get_current_month_spend.assert_called_once_with()
+
+
+def test_tracker_current_month_spend(tmp_path: Path):
+    tracker = LLMUsageTracker(db_path=tmp_path / "usage.sqlite3")
+    assert tracker.get_current_month_spend() == 0.0
+    with sqlite3.connect(tracker.db_path) as conn:
+        conn.execute("INSERT INTO llm_usage (timestamp, total_cost) VALUES (datetime('now'), 0.2)")
+        conn.execute(
+            "INSERT INTO llm_usage (timestamp, total_cost) "
+            "VALUES (datetime('now', 'start of month', '-1 second'), 5.0)"
+        )
+        conn.execute(
+            "INSERT INTO llm_usage (timestamp, total_cost) "
+            "VALUES (datetime('now', 'start of month', '+1 month'), 6.0)"
+        )
+
+    assert tracker.get_current_month_spend() == pytest.approx(0.2)
+    assert tracker.get_total_spend() == pytest.approx(11.2)
+
+
+def test_invoice_ocr_logs_tracker_fields(tmp_path: Path, monkeypatch):
+    invoice = _sample_invoice()
+    model = Mock()
+    model.with_structured_output.return_value.invoke.return_value = invoice
+    monkeypatch.setattr(invoice_vision_audit, "ChatOpenAI", Mock(return_value=model))
+    guard = BudgetGuard(tmp_path / "usage.sqlite3")
+
+    invoice_vision_audit.extract_invoice_with_openai(b"image", budget_guard=guard, branch_code="AMK-01")
+
+    usage = guard.usage_tracker.get_latest_usage()
+    assert usage["thread_id"] == "ocr_vision:AMK-01"
+    assert usage["model_name"] == "gpt-4o-mini"
+    assert usage["input_tokens"] == 1200
+    assert usage["output_tokens"] > 0
 
 
 def test_vector_chunking_strategies():

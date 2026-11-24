@@ -15,8 +15,10 @@ from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.loader.mysql import Loader, read_csv
 from kaya_kopi.ingestion.parsers import image_ingestion_openai as pipeline
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import InvoiceOCRResult, LineItemOCR
+from kaya_kopi.ingestion.parsers.vector_chunking import build_chunks, estimate_tokens
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
+from kaya_kopi.security.budget_guard import BudgetGuard
 
 
 class FixedEmbedding(EmbeddingFunction):
@@ -29,6 +31,24 @@ class FixedEmbedding(EmbeddingFunction):
     @staticmethod
     def name():
         return "fixed_test_embedding"
+
+
+def test_embedding_records_tracker_fields(tmp_path: Path, monkeypatch):
+    cfg = AppConfig(sqlite_db_path=tmp_path / "ops.sqlite3", embed_model="text-embedding-3-small")
+    guard = BudgetGuard(cfg.sqlite_db_path)
+    vectors = object.__new__(SharedChromaRepository)
+    vectors.cfg = cfg
+    vectors.budget_guard = guard
+    monkeypatch.setattr(vectors, "get_collection", lambda: Mock())
+    chunks = build_chunks("doc1", text="Coffee invoice", strategy="single")
+
+    assert vectors.upsert_chunks("doc1", chunks, "invoice") == 1
+    usage = guard.usage_tracker.get_latest_usage()
+    assert usage["thread_id"] == "embedding:doc1"
+    assert usage["prompt"] == "Embed invoice"
+    assert usage["model_name"] == cfg.embed_model
+    assert usage["input_tokens"] == estimate_tokens("Coffee invoice")
+    assert usage["output_tokens"] == 0
 
 
 def test_full_pipeline_builds_mysql_staging_and_reuses_sqlite(tmp_path: Path, monkeypatch):
@@ -86,6 +106,9 @@ def test_full_pipeline_builds_mysql_staging_and_reuses_sqlite(tmp_path: Path, mo
     assert json.loads(sidecar.read_text())["text"] == "Invoice text"
     generic = root / "runtime" / "ocr_openai_all" / "other" / "document.tiff.ocr.json"
     assert json.loads(generic.read_text())["text"] == "Other image text"
+    usage = BudgetGuard(cfg.sqlite_db_path).usage_tracker.get_latest_usage()
+    assert usage["thread_id"].startswith("ocr_vision:")
+    assert usage["prompt"] == "Transcribe the image text."
     request = model.invoke.call_args.args[0][1].content
     assert request[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
