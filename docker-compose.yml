@@ -20,7 +20,11 @@ services:
     ports:
       - "127.0.0.1:${KAYA_CHROMA_HOST_PORT:-8000}:8000"
     volumes:
-      - ./data/local_chroma_db:/data
+      - type: bind
+        source: ./data/local_chroma_db
+        target: /data
+        bind:
+          create_host_path: false
     healthcheck:
       test:
         - CMD
