@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker, TurnUsageSummary
+from kaya_kopi.security.guardrails import protect_text
 
 
 def format_turn_usage(summary: TurnUsageSummary | None) -> str | None:
@@ -100,7 +101,7 @@ def render_usage_log_panel(tracker: LLMUsageTracker) -> None:
             cost = entry["total_cost"]
             rows.append({
                 "Timestamp (UTC+8)": _singapore_timestamp(entry["timestamp"]),
-                "Prompt": (entry["prompt"] or "")[:100],
+                "Prompt": protect_text(entry["prompt"] or "")[:100],
                 "Model": entry["model_name"],
                 "Input tokens": entry["input_tokens"],
                 "Cached input tokens": entry["cached_input_tokens"],

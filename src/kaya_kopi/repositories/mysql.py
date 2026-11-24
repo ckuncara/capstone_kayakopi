@@ -395,7 +395,7 @@ class MySQLRepository:
             if analysis == "wastage":
                 bounds = self._query("""SELECT MIN(business_date) AS start, MAX(business_date) AS end
                     FROM daily_outlet_summary WHERE wastage_kg IS NOT NULL""")[0]
-            elif analysis == "staffing":
+            elif analysis in {"staffing", "headcount"}:
                 bounds = self._query("""SELECT MAX(roster_month) AS start,
                     LAST_DAY(MAX(roster_month)) AS end FROM staff_roster""")[0]
             else:
@@ -413,6 +413,66 @@ class MySQLRepository:
             selected = [code for code in selected if self._resolve_outlet(code, start_date, end_date)[0] in matching]
         period = {"start": start_date.isoformat(), "end": end_date.isoformat()}
         scope = {"period": period, "default_period": default_period, "outlet_type": outlet_type}
+        if analysis == "headcount":
+            requested_months = {
+                (start_date + timedelta(days=offset)).isoformat()[:7]
+                for offset in range((end_date - start_date).days + 1)
+            }
+            results = []
+            for requested_code in selected:
+                outlet, _alias = self._resolve_outlet(requested_code, start_date, end_date)
+                counts = self._query(
+                    """
+                    SELECT r.roster_month, TRIM(a.role) AS role,
+                           COUNT(DISTINCT a.staff_key) AS headcount
+                    FROM staff_assignment a
+                    JOIN staff_roster r ON r.staff_roster_id=a.staff_roster_id
+                    JOIN outlets o ON o.outlet_id=a.outlet_id
+                    WHERE o.outlet_code=%s
+                      AND r.roster_month <= %s
+                      AND LAST_DAY(r.roster_month) >= %s
+                    GROUP BY r.roster_month, TRIM(a.role)
+                    ORDER BY r.roster_month, role
+                    """,
+                    (outlet, end_date, start_date),
+                )
+                sources = self._query(
+                    """
+                    SELECT DISTINCT s.source_uri
+                    FROM staff_roster r
+                    JOIN source_document s ON s.source_document_id=r.source_document_id
+                    JOIN staff_assignment a ON a.staff_roster_id=r.staff_roster_id
+                    JOIN outlets o ON o.outlet_id=a.outlet_id
+                    WHERE o.outlet_code=%s
+                      AND r.roster_month <= %s
+                      AND LAST_DAY(r.roster_month) >= %s
+                    ORDER BY s.source_uri
+                    """,
+                    (outlet, end_date, start_date),
+                )
+                results.append({
+                    "outlet_code": outlet,
+                    "roster_available": bool(counts),
+                    "missing_roster_months": sorted(
+                        requested_months - {row["roster_month"][:7] for row in counts}
+                    ),
+                    "counts_by_month_and_role": counts,
+                    "citation": {
+                        "source_locator": "tables=staff_roster,staff_assignment",
+                        "source_uris": [row["source_uri"] for row in sources],
+                    },
+                })
+            return {
+                "analysis": analysis,
+                **scope,
+                "status": "COMPLETE" if results and all(
+                    not result["missing_roster_months"] for result in results
+                ) else "PARTIAL" if any(result["roster_available"] for result in results)
+                else "NO_OBSERVATIONS",
+                "results": results,
+                "definition": "Distinct rostered staff per outlet, role and month; not attendance or staff on duty at a particular time.",
+                "limitation": "Missing roster data is not zero staff. Do not sum monthly or role counts to infer unique staff across months or roles. Partial-month dates still describe the monthly roster.",
+            }
         if analysis == "wastage":
             results = []
             for requested_code in selected:
@@ -1110,6 +1170,29 @@ class MySQLRepository:
             "authority": "VALIDATED_SCANNED_INVOICE_LINES",
             "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
         }
+
+    def get_supplier_addresses(self, supplier_name: str) -> dict[str, Any]:
+        supplier = supplier_name.strip()
+        if len(supplier) < 2:
+            raise ValueError("supplier_name must contain at least two characters")
+        results = self._query(
+            """
+            SELECT DISTINCT
+                   i.supplier_name,
+                   i.supplier_address,
+                   CONCAT(s.source_uri, '#invoice=', i.invoice_number)
+                       AS invoice_reference
+            FROM supplier_invoice i
+            JOIN source_document s
+              ON s.source_document_id = i.source_document_id
+            WHERE UPPER(TRIM(i.supplier_name)) = UPPER(%s)
+              AND NULLIF(TRIM(i.supplier_address), '') IS NOT NULL
+            ORDER BY i.supplier_name, i.supplier_address, invoice_reference
+            LIMIT 10
+            """,
+            (supplier,),
+        )
+        return {"results": results}
 
     def get_invoice(self, invoice_number: str) -> dict[str, Any]:
         number = invoice_number.strip().upper()
