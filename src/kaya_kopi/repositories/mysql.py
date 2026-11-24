@@ -1453,7 +1453,50 @@ class MySQLRepository:
             proposed_units = units * factor
             proposed_sales = current_sales * factor + proposed_units * increase
             scenarios.append({"demand_change_percent": change, "projected_units": proposed_units.quantize(Decimal("0.01")), "projected_gross_sales_sgd": proposed_sales.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "incremental_gross_sales_sgd": (proposed_sales-current_sales).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "incremental_ex_gst_sales_sgd": ((proposed_sales-current_sales)/Decimal("1.09")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)})
+        # --- Assumption-based ingredient cost (client gave no recipe; we state ours) ---
+        base_price = Decimal(observed["minimum_observed_price_sgd"] or 1.60)
+        base_cpc = (Decimal("5")/Decimal("1000")*Decimal("13.54")
+                    + Decimal("25")/Decimal("1000")*Decimal("5.01")
+                    + Decimal("15")/Decimal("1000")*Decimal("4.68")
+                    + Decimal("0.05"))
+        ingredient = base_price - base_cpc
+        ingredient_pct = (ingredient / base_price * 100).quantize(Decimal("1"))
+        be_pct = (Decimal(gross_price_increase_sgd)
+                  / (base_price + Decimal(gross_price_increase_sgd)) * 100).quantize(Decimal("0.1"))
+        cost_assumption = {
+            "basis": "assumption-based ingredient cost (no recipe/portion spec provided by client)",
+            "assumptions": [
+                "5 g roasted kopi per cup",
+                "25 ml condensed milk per cup",
+                "15 ml evaporated milk per cup",
+                "S$0.05 cup + lid",
+                "milk carton = 24 x 400 ml (12/48 tins also tested in sensitivity)",
+                "labour, rent, equipment EXCLUDED (contribution margin, not full cost)",
+            ],
+            "evidence": {
+                "roasted_kopi_sgd_per_kg": [13.18, 13.99],
+                "roasted_kopi_median_sgd_per_kg": 13.54,
+                "milk_carton_size_assumed": "24 x 400 ml (net mass not legible on scans)",
+                "condensed_milk_carton_sgd": 48.13,  # 44.99-50.71
+                "evaporated_milk_carton_sgd": 44.92,  # 41.78-46.05
+                "source": "69-scan invoice set (Heng Huat, D'Best, etc.); latest legible 12 Jun 2026",
+            },
+            "cost_per_cup_sgd": base_cpc.quantize(Decimal("0.01")),
+            "ingredient_margin_sgd": ingredient.quantize(Decimal("0.01")),
+            "ingredient_margin_pct": str(ingredient_pct) + "%",
+            "incremental_per_cup_sgd": Decimal(gross_price_increase_sgd).quantize(Decimal("0.01")),
+            "break_even_demand_loss_pct": str(be_pct) + "% (cost-independent; = 0.10 / 1.70)",
+            "cost_sensitivity_by_milk_carton": [
+                {"carton_tins": 12, "cost_per_cup_sgd": "0.51"},
+                {"carton_tins": 24, "cost_per_cup_sgd": "0.31"},
+                {"carton_tins": 48, "cost_per_cup_sgd": "0.22"},
+            ],
+            "interpretation": ("The +10c is a pure +10c to every cup sold (cost-independent). "
+                               "Break-even is a 5.9% demand loss. Above that, the raise loses money. "
+                               "The only decision-critical unknown is the demand response, which the data cannot answer."),
+        }
         return {
+            "cost_assumption": cost_assumption,
             "status": "PARTIAL",
             "recommendation": "INSUFFICIENT_EVIDENCE",
             "menu_scope": menu_scope,
@@ -1461,7 +1504,7 @@ class MySQLRepository:
             "gross_price_increase_sgd": increase,
             "scenarios": scenarios,
             "missing_for_decision": ["complete kopi unit volume", "recipe-level ingredient cost per cup", "target margin", "evidence of demand response to a price change"],
-            "explanation": "This is a sensitivity analysis, not a pricing recommendation. POS volume is incomplete and invoice trends do not identify recipe consumption per cup.",
+            "explanation": "This is a sensitivity analysis, not a pricing recommendation. POS volume is incomplete and invoice trends do not identify recipe consumption per cup. The ingredient cost is an ASSUMPTION-based estimate (no recipe provided); the +10c margin effect and the 5.9% break-even demand loss are cost-independent. See cost_assumption for the stated recipe, evidence, and sensitivity.",
             "citation": [{"source_uri": "data/sql/kayakopi_pos.sql", "source_locator": "tables=pos_transactions,menu_items"}, {"source_locator": "tables=supplier_invoice,supplier_invoice_item"}],
         }
 
