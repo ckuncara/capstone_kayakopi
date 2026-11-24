@@ -9,9 +9,12 @@ from kaya_kopi.copilot.tools import ALL_TOOLS
 
 Tools:
 
-- `analyze_outlets_sql`: authoritative performance, measured wastage, and roster-based staffing;
+- `analyze_outlets_sql`: authoritative performance, measured wastage, roster-based staffing,
+  and monthly headcounts by outlet and role (`analysis="headcount"`);
 - `analyze_pos_sql`: observed product mix, prices, payment modes, and time-of-day patterns from the explicitly partial POS export;
 - `analyze_suppliers_sql`: scanned invoices, canonical spend, cost trends, item price changes, and purchase reconciliation;
+- `get_supplier_addresses_sql`: recorded business addresses and supporting invoice references
+  for an exact supplier name, ignoring case and surrounding spaces;
 - `get_data_coverage_sql`: objective source counts and completeness limitations;
 - `search_documents_sql`: MySQL full-text search with substring fallback and entity filters;
 - `assess_kopi_price_change_sql`: transparent price sensitivity scenarios with an insufficient-evidence decision state; and
@@ -51,3 +54,32 @@ Set `OPENAI_API_KEY` in `.env`, then run from the repository root:
 The database tools themselves do not need an API key. The natural-language agent does, because the
 LLM decides which tool and arguments to use. `KAYA_OPENAI_MODEL` optionally overrides the default
 `gpt-4o-mini` model, and standard `OPENAI_BASE_URL` configuration is supported by LangChain.
+
+## Chat privacy checks
+
+Staff-count questions use monthly roster headcounts, counting distinct staff keys within each outlet
+and role without returning names or pay rates. Undated questions use the latest roster month.
+Counts describe the monthly roster, not attendance or a particular shift; missing roster data is not
+zero staff, and counts must not be summed across months or roles to infer unique staff.
+Outlet-qualified payroll and staff-pay summaries are allowed; individual-pay checks still apply
+separately to each sentence or line, so an outlet total does not exempt nearby personal-pay details.
+
+The supplier-address lookup reads only supplier names, recorded addresses, and invoice references
+from MySQL. It returns at most 10 distinct invoice-backed records, not a complete address history.
+An empty result means no recorded address matched that exact name. Differing addresses should be
+reported with their references, without assuming which is current. The structured `supplier_address`
+field from this tool has the same privacy exception as supplier invoice details, including when
+reopening a chat. This trusts the source field's classification; it does not independently verify
+that an address is a business address. Other address fields retain the normal checks.
+
+The main copilot checks recognised requests for individual pay, staff discipline or
+performance, legal or tax advice, bulk exports, and external actions before calling the
+model. Tool results and answers are checked for common contact details and confidential HR data.
+An answer is withheld if no tool returned a result in the current turn; this does not prove that
+every statement in an answer is supported by the result.
+The copilot continues to allow aggregate labour costs and user-initiated invoice uploads.
+
+These are pattern-based checks, not a guarantee that every wording, personal address, or
+indirect disclosure will be detected. Review access controls and existing saved data before
+deployment. Existing conversation checkpoints and source records are not deleted or rewritten
+by these changes.

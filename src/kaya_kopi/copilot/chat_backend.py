@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime
@@ -9,9 +10,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Iterator, TypedDict
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -21,6 +24,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py)
 from kaya_kopi.copilot.tools import ALL_TOOLS
 from kaya_kopi.paths import project_root
+from kaya_kopi.security.guardrails import FINANCE_REFUSAL, protect_answer, protect_text, refuse_request
 
 
 SYSTEM_PROMPT = """You are the Kaya Kopi operations copilot.
@@ -32,6 +36,16 @@ missing, say exactly what could not be checked. Scanned supplier invoices are au
 supplier costs when they conflict with the legacy purchase table; if an invoice header is internally
 inconsistent, use validated line arithmetic and disclose the review flag. Keep answers concise and use SGD
 for monetary amounts. The tools are read-only; do not claim to change client data.
+
+Do not disclose personal contact details, home addresses, individual pay, performance, or discipline.
+Names of people who reported operational issues may be shown.
+Do not offer legal or tax advice, price recommendations, or make decisions for the user.
+
+For supplier business-address questions, use get_supplier_addresses_sql with the full recorded
+supplier name. Ask for the supplier name if it is missing. The lookup returns at most 10 invoice-backed
+records, not a complete address history. If results are empty, say no recorded address matched that
+exact name. If addresses differ, report the differences and their invoice references; do not infer
+which address is current.
 
 Follow tool status, conclusions, authority, comparison scope, exclusions, and limitations exactly.
 Do not rank records marked non-comparable. Do not turn missing evidence into zero, no change, or a
@@ -52,7 +66,13 @@ Outlet-wide takings and product mix cannot establish a product margin. Report th
 tool's missing inputs when it returns insufficient evidence. If the tool gives a
 last_observed_date, explicitly state that the available POS records end on that date.
 
-For staffing, payroll, or overstaffing questions, call analyze_outlets_sql with analysis="staffing"
+For staff-count questions (including how many baristas work at an outlet), call analyze_outlets_sql
+with analysis="headcount". Use its monthly role counts, not staffing cost data or document search.
+Omit both dates for the latest roster month unless the user specifies a period. State the roster
+month and distinguish rostered headcount from actual attendance. Missing roster data is not zero.
+Do not sum counts across months or roles to infer unique staff.
+
+For labour cost, payroll, or overstaffing questions, call analyze_outlets_sql with analysis="staffing"
 in the same turn. Use outlet_type="mall" for mall stalls. When the user gives no date and there
 is no prior analysis to continue, omit both dates so the tool selects the latest roster month.
 Show the scheduled labour cost and observed POS takings as separate figures, with the coverage
@@ -73,6 +93,107 @@ def _current_system_message() -> SystemMessage:
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _safe_tool_value(value: object, key: str = "", allow_supplier_address: bool = False) -> object:
+    if key in {"staff_name", "hourly_rate_sgd", "raw_hourly_rate", "hourly_rate", "pay_rate"}:
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            name: _safe_tool_value(item, name, allow_supplier_address)
+            for name, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_safe_tool_value(item, allow_supplier_address=allow_supplier_address) for item in value]
+    if isinstance(value, str):
+        if key == "supplier_address" and allow_supplier_address:
+            return protect_text(value, [value])
+        return protect_answer(value)
+    return value
+
+
+def _safe_tool_message(message: ToolMessage) -> ToolMessage:
+    content = message.content
+    if not isinstance(content, str):
+        return message.model_copy(update={"content": "Tool output withheld: unsupported format."})
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        value = None
+    if value is not None:
+        content = json.dumps(
+            _safe_tool_value(
+                value,
+                allow_supplier_address=message.name in {
+                    "analyze_suppliers_sql", "get_supplier_addresses_sql",
+                },
+            ),
+            ensure_ascii=False,
+        )
+    else:
+        content = protect_answer(content)
+    return message.model_copy(update={"content": content, "artifact": None})
+
+
+def _safe_ai_message(message: AIMessage, addresses: list[str]) -> AIMessage:
+    content = message.content
+    if isinstance(content, str):
+        content = protect_answer(content, addresses)
+    elif content:
+        content = "The model returned an unsupported answer format."
+    calls = [
+        {**call, "args": _safe_tool_value(call["args"])}
+        for call in message.tool_calls
+    ]
+    extra = {key: value for key, value in message.additional_kwargs.items() if key != "tool_calls"}
+    return message.model_copy(
+        update={"content": content, "tool_calls": calls, "additional_kwargs": extra}
+    )
+
+
+def _supplier_addresses(messages: list[BaseMessage]) -> list[str]:
+    addresses = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) or message.name not in {
+            "analyze_suppliers_sql", "get_supplier_addresses_sql",
+        }:
+            continue
+        try:
+            result = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(result, dict):
+            continue
+        if message.name == "analyze_suppliers_sql":
+            records = [result.get("invoice")]
+        else:
+            records = result.get("results", [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            address = record.get("supplier_address")
+            if isinstance(address, str) and address:
+                addresses.append(address)
+    return addresses
+
+
+def _has_tool_result(messages: list[BaseMessage]) -> bool:
+    for message in reversed(messages):
+        if message.type == "human":
+            break
+        if not isinstance(message, ToolMessage) or message.status == "error":
+            continue
+        try:
+            result = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            return bool(message.content)
+        if isinstance(result, dict) and result.get("ok") is False:
+            continue
+        if result:
+            return True
+    return False
 
 
 def _repair_interrupted_tool_calls(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -128,15 +249,45 @@ def get_chatbot():
     )
     model_with_tools = model.bind_tools(ALL_TOOLS)
 
+    tool_node = ToolNode(ALL_TOOLS)
+
+    def safe_tools(state: ChatState, config: RunnableConfig) -> dict[str, list[BaseMessage]]:
+        result = tool_node.invoke(state, config=config)
+        return {
+            "messages": [
+                _safe_tool_message(message) if isinstance(message, ToolMessage) else message
+                for message in result["messages"]
+            ]
+        }
+
     def chat_node(state: ChatState) -> dict[str, list[BaseMessage]]:
-        messages = [
-            message for message in _repair_interrupted_tool_calls(state["messages"])
-            if not isinstance(message, SystemMessage)
-        ]
+        from langchain_core.messages import HumanMessage
+
+        messages = []
+        for message in _repair_interrupted_tool_calls(state["messages"]):
+            if isinstance(message, SystemMessage):
+                continue
+            if isinstance(message, ToolMessage):
+                message = _safe_tool_message(message)
+            elif isinstance(message, HumanMessage) and isinstance(message.content, str):
+                message = message.model_copy(update={"content": protect_text(message.content)})
+            elif isinstance(message, AIMessage):
+                message = _safe_ai_message(message, _supplier_addresses(messages))
+            messages.append(message)
         messages.insert(0, _current_system_message())
         
         # Invoke model and capture response with token usage (llm_usage_tracker.py)
         response = model_with_tools.invoke(messages)
+        response = _safe_ai_message(response, _supplier_addresses(messages))
+        if (
+            not response.tool_calls
+            and response.content
+            and response.content != FINANCE_REFUSAL
+            and not _has_tool_result(messages)
+        ):
+            response = response.model_copy(
+                update={"content": "I couldn't verify an answer from the available data."}
+            )
         
         # Store response metadata with tokens in state for later capture (llm_usage_tracker.py)
         if hasattr(response, 'response_metadata') and response.response_metadata:
@@ -148,7 +299,7 @@ def get_chatbot():
     checkpointer = SqliteSaver(connection)
     graph = StateGraph(ChatState)
     graph.add_node("chat", chat_node)
-    graph.add_node("tools", ToolNode(ALL_TOOLS))
+    graph.add_node("tools", safe_tools)
     graph.add_edge(START, "chat")
     graph.add_conditional_edges("chat", tools_condition, {"tools": "tools", END: END})
     graph.add_edge("tools", "chat")
@@ -179,7 +330,7 @@ def get_thread_names() -> dict[str, str]:
 
 def rename_thread(thread_id: str, name: str) -> None:
     """Save a name for an existing conversation."""
-    name = name.strip()
+    name = protect_text(name.strip())
     if not name:
         raise ValueError("Conversation name cannot be empty.")
     if len(name) > 80:
@@ -209,20 +360,24 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
     from langchain_core.messages import HumanMessage, AIMessage
     import streamlit as st
 
+    refusal = refuse_request(message)
+    if refusal:
+        yield AIMessage(content=refusal), {}
+        return
+    message = protect_text(message)
     config = {"configurable": {"thread_id": thread_id}}
+    turn_id = str(uuid4())
     
     # Get the shared tracker from Streamlit session state (llm_usage_tracker.py, llm_ui_components.py)
     if "usage_tracker" not in st.session_state:
         st.session_state.usage_tracker = LLMUsageTracker()
-    tracker = st.session_state.usage_tracker
+    tracker = st.session_state["usage_tracker"]
     model_name = os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
     
     # Stream with stream_mode="updates" to capture token data
     # In "updates" mode, we get deltas like {"chat": state} or {"tools": state}
-    tokens_logged = False
-    
     for update in get_chatbot().stream(
-        {"messages": [HumanMessage(content=message)]},
+        {"messages": [HumanMessage(content=message, id=turn_id)]},
         config=config,
         stream_mode="updates",
     ):
@@ -232,18 +387,10 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
                 messages = node_state["messages"]
                 if messages:
                     for msg in messages:
-                        # Log tokens from the first AIMessage we encounter (after initial prompt)
-                        if isinstance(msg, AIMessage) and not tokens_logged:
-                            if hasattr(msg, 'usage_metadata') and msg.usage_metadata:
-                                usage_meta = msg.usage_metadata
-                                if isinstance(usage_meta, dict):
-                                    input_tokens = usage_meta.get('input_tokens', 0)
-                                    output_tokens = usage_meta.get('output_tokens', 0)
-                                    
-                                    # Log if we have tokens (llm_usage_tracker.py)
-                                    if input_tokens > 0 or output_tokens > 0:
-                                        tracker.log_usage(thread_id, message, model_name, input_tokens, output_tokens)
-                                        tokens_logged = True
+                        if isinstance(msg, AIMessage):
+                            tracker.log_response(
+                                thread_id, message, msg, model_name, turn_id=turn_id,
+                            )
                         
                         # Yield every message for the UI to handle
-                        yield (msg, {})
+                        yield (msg, {"turn_id": turn_id})

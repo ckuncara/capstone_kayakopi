@@ -52,6 +52,36 @@ docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
 This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
 it is intentionally not part of the automated test suite.
 
+### LLM spend tracking
+
+The spend meter and usage log refresh every five seconds while their page is open. Usage is stored
+locally in the `llm_usage` table of `LOCAL_SQLITE_PATH` (Docker: `/workspace/data/kaya_ops.db`,
+mounted from `data/kaya_ops.db`). This is not a shared team ledger or a provider billing total.
+Each model response in a streamed chat turn is logged, including tool-selection and final-answer
+calls. OCR and invoice chat use the same response-metadata logger; embeddings use provider counts.
+Log timestamps display in Singapore time (UTC+8); stored timestamps, monthly budgets, and billing
+comparison periods remain UTC. Each new chat answer has a subtle grey footer with the model(s),
+combined input/output tokens, and estimated USD cost across all model calls for that question,
+including context and tool results. The footer survives reruns and reopening a saved conversation.
+Older turns without a saved usage association do not show a reconstructed estimate.
+
+Costs are **estimates** using the explicit standard USD-per-million-token rates and exact snapshot
+aliases in `src/kaya_kopi/copilot/llm_usage_tracker.py`. Review the linked provider pricing before
+updating the rate table and its version; each new priced row retains the pricing version used.
+Cached input is charged separately; reasoning tokens are recorded but are already included in
+output tokens. The returned model, requested model, response ID, and provider token details are
+retained where available. Unknown models, unsupported tiers/audio pricing, or missing token counts
+are saved as **unpriced**, not charged as a different model or counted as free. Totals exclude
+unpriced calls and warn that the budget is incomplete; budget-guarded OCR/embedding calls pause
+until missing usage/pricing is resolved. Existing rows remain unchanged and labeled legacy estimates.
+
+In **LLM Usage Log → Compare with provider billing**, enter a provider USD usage total before
+credits/tax, a matching UTC date range (start inclusive, end exclusive), and the matching project/
+API-key scope. Confirm that the filters cover only usage recorded in this local database. The saved
+comparison shows provider cost minus the local estimate and flags incomplete periods; it never
+rewrites historical usage or the budget. Provider reporting may lag, and usage on teammates' laptops
+or other clients will not be captured here. No organization admin API key is required.
+
 See [docs/implementation/ingestion.md](docs/implementation/ingestion.md) for individual parser,
 schema and loader commands.
 
