@@ -40,6 +40,7 @@
 | 18 Nov | C→T | Email attach | — | **Staff roster received**: `staff_roster_jun2026.xlsx` → saved `data/staff_roster_jun2026.xlsx` (Jun 2026, 12 outlets, 45 staff rows; 4 rates "TBC") | Unblocks Q12 / over-staffing answers |
 | 23 Nov | T→C | Email | Client question — Team 1 (RE) | Sent guardrail-policy confirmation Q14–Q23 (10 questions) in the existing thread; safe defaults stated; soft deadline Wed 25 Nov | Awaiting reply — Mike |
 | 23 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received — ALL 10 answered** (Q14–Q23): “Your defaults are fine” + per-question answers (Serene Lim). Full verbatim in `client_qa.md`; encoded in `src/kaya_kopi/guardrails.py` | ✅ Logged + policy in code 23 Nov — Mike |
+| 24 Nov | T→C | Email (draft) | Client question — Team 1 (RE) | New batch Q12–Q16 drafted in-thread: Q12 kopi margin + S$0.10 decision (recipe/portion spec, unit costs, target margin, demand evidence) · Q13 mall-outlet item-level sales + POS missing dates (or confirm unavailable) · Q14 staffing benchmark (labour % of takings / takings per paid hour, by outlet type; scheduled vs actual cost) · Q15 chain-wide wastage (records beyond BDK-01/WDL-01, else prospective daily weighing + owner) · Q16 invoice coverage (clearer scans of unreadable unit prices; invoices after 12 Jun 2026) | Mike — send, then log answers |
 
 ---
 
@@ -133,3 +134,10 @@ Don't email the client directly — route through me so we ask once, clearly.
 - Guardrail policy confirmation, Q14–Q23 (see `client_qa.md`), to be sent in the same thread.
 - Framing: safe defaults already in place (read-only, PII redaction, no bulk exports); client answers finalize the policy in code; soft deadline Wed 25 Nov ahead of the 27 Nov demo.
 - Status: **SENT 23 Nov in the same thread; reply received same day — all 10 answered**. Defaults confirmed by client; policy locked in code (`src/kaya_kopi/guardrails.py`); verbatim answers in `client_qa.md` (Q14–Q23).
+
+
+## Drafted 24 Nov 2026, by Mike (for the existing client email thread)
+
+- New batch Q12–Q16: Q12 kopi margin & the S$0.10 decision (recipe/portion spec current + historical, unit costs used by Finance, target margin, demand evidence) · Q13 complete mall-outlet sales evidence (item-level kopi quantities, daily takings, POS missing dates; or confirm unavailable) · Q14 staffing assessment (Finance/HR overstaffing benchmark, by outlet type; scheduled roster vs actual labour cost; attendance/payroll hours + mall takings if actual) · Q15 chain-wide wastage (dated records beyond BDK-01/WDL-01; else standardized daily weighing prospectively + owner) · Q16 invoice coverage (clearer copies where unit prices unreadable; supplier invoices after 12 Jun 2026).
+- Framing: directional kopi cost trend already built from legible scans (kopi/roast +5.5%, tea dust +12.9%, Aug 2025 → Jun 2026); these answers firm it up. Demo Fri 27 Nov — present directional findings with stated assumptions for anything still pending.
+- Status: **DRAFTED 24 Nov — not yet sent.**

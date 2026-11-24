@@ -38,3 +38,14 @@ Status: **ANSWERED 23 Nov 2026** (Serene Lim, Finance & Admin Manager — verbat
 | Q21 | May prompts, answers and retrieved evidence be stored in operational traces? If so, what retention period and redaction rules apply? | "Yes, keep the questions and answers for six months, with the same rules as point 4." → **ANSWERED 23 Nov**  |
 | Q22 | Apart from personal-data requests, are there other question categories the copilot must always refuse? | "Refuse anything about one person’s pay, performance or discipline, and any legal or tax advice. Send those to me. On prices, show the numbers but leave the decision to the boss." → **ANSWERED 23 Nov**  |
 | Q23 | Confirm the copilot must not modify records, place orders, send messages or perform other external actions (read-only)? | "Confirmed. It only reads. No changes, no orders, no messages." → **ANSWERED 23 Nov**  |
+
+
+## Q12–Q16 — follow-up batch (raised 24 Nov 2026, pending client reply)
+
+| Q | Question (raised by us) | Answer | Impact |
+|---|---|---|---|
+| Q12 | Kopi margin and the S$0.10 price decision: current + historical recipe/portion spec (quantities, yields, packaging, outlet differences), unit costs used by Finance, target margin, sales/prior price-change demand evidence | _pending_ (raised 24 Nov) | T-final — margin answer for the 10-cent question; firms up `build/out/kopi_trend_report.md` |
+| Q13 | Complete item-level kopi quantities + daily takings for mall outlets (ORC/VIV/JEM/PGL) + missing POS dates for the periods under review; if mall system/POS vendor cannot provide, confirm unavailable | _pending_ (raised 24 Nov) | T1/T3 — mall-stall sales basis (POS table is current sole source per pt 4) |
+| Q14 | Staffing: Finance/HR overstaffing benchmark (labour % of takings or takings per paid hour; by outlet type?); scheduled roster cost vs actual labour cost; if actual — attendance/payroll hours + complete mall-stall takings for those dates | _pending_ (raised 24 Nov) | T10 — labour/overstaffing finding (roster is Jun 2026 only, 4 rates TBC→$13) |
+| Q15 | Chain-wide wastage: dated historical records beyond BDK-01/WDL-01 (collection/mall waste)? Else standardized daily weighing prospectively + who owns it | _pending_ (raised 24 Nov) | T11 — wastage comparison currently BDK-01 vs WDL-01 only |
+| Q16 | Invoice coverage: clearer copies of 69-scan pages with unreadable unit prices; supplier invoices after 12 Jun 2026 | _pending_ (raised 24 Nov) | T4/T5 + kopi trend — closes the 7/12 Heng Huat legibility gap; extends trend past Jun 2026 |
