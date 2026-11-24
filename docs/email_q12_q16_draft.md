@@ -3,7 +3,7 @@
 > **Reply in the existing client thread.** To: leonard.ngwt@ntu.edu.sg
 > **Subject (keep):** `Client question — Team 1`
 > **Context:** follows the 23 Nov guardrail-policy exchange (all 10 answered).
-> **After sending:** log the send in `docs/client_comms.md`; set Q12–Q16 → `Sent to client` in `docs/client_qa.md`; record each verbatim answer as it arrives.
+> **STATUS: SENT 24 Nov — reply received same day, all 5 points answered (no more data before the demo).** Verbatim answers in `client_qa.md`; reply drafted in `docs/email_reply_serene_24nov.md`.
 
 ---
 

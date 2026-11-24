@@ -39,13 +39,16 @@ Status: **ANSWERED 23 Nov 2026** (Serene Lim, Finance & Admin Manager — verbat
 | Q22 | Apart from personal-data requests, are there other question categories the copilot must always refuse? | "Refuse anything about one person’s pay, performance or discipline, and any legal or tax advice. Send those to me. On prices, show the numbers but leave the decision to the boss." → **ANSWERED 23 Nov**  |
 | Q23 | Confirm the copilot must not modify records, place orders, send messages or perform other external actions (read-only)? | "Confirmed. It only reads. No changes, no orders, no messages." → **ANSWERED 23 Nov**  |
 
+## Follow-up batch of 24 Nov (raised 24 Nov — points 1–5 in the email; distinct from Q12/Q13 of the 16 Nov batch)
 
-## Q12–Q16 — follow-up batch (raised 24 Nov 2026, pending client reply)
+Status: **ANSWERED 24 Nov 2026 (Serene Lim, verbatim below). Directive: no more data before the demo — work with the package, state assumptions, show how answers change.**
 
-| Q | Question (raised by us) | Answer | Impact |
+| # | Question (raised by us) | Answer (verbatim) | Impact |
 |---|---|---|---|
-| Q12 | Kopi margin and the S$0.10 price decision: current + historical recipe/portion spec (quantities, yields, packaging, outlet differences), unit costs used by Finance, target margin, sales/prior price-change demand evidence | _pending_ (raised 24 Nov) | T-final — margin answer for the 10-cent question; firms up `build/out/kopi_trend_report.md` |
-| Q13 | Complete item-level kopi quantities + daily takings for mall outlets (ORC/VIV/JEM/PGL) + missing POS dates for the periods under review; if mall system/POS vendor cannot provide, confirm unavailable | _pending_ (raised 24 Nov) | T1/T3 — mall-stall sales basis (POS table is current sole source per pt 4) |
-| Q14 | Staffing: Finance/HR overstaffing benchmark (labour % of takings or takings per paid hour; by outlet type?); scheduled roster cost vs actual labour cost; if actual — attendance/payroll hours + complete mall-stall takings for those dates | _pending_ (raised 24 Nov) | T10 — labour/overstaffing finding (roster is Jun 2026 only, 4 rates TBC→$13) |
-| Q15 | Chain-wide wastage: dated historical records beyond BDK-01/WDL-01 (collection/mall waste)? Else standardized daily weighing prospectively + who owns it | _pending_ (raised 24 Nov) | T11 — wastage comparison currently BDK-01 vs WDL-01 only |
-| Q16 | Invoice coverage: clearer copies of 69-scan pages with unreadable unit prices; supplier invoices after 12 Jun 2026 | _pending_ (raised 24 Nov) | T4/T5 + kopi trend — closes the 7/12 Heng Huat legibility gap; extends trend past Jun 2026 |
+| 1 (kopi margin / S$0.10) | Recipe/portion spec, unit costs, target margin, demand evidence | "No recipe cards, no target margin, no price-change history. State your assumptions and show me how the answer changes." | **Margin model from existing data**: invoice unit costs (source of truth) + POS selling prices; recipe & target-margin assumptions written down; **sensitivity table** (cost per cup, target margin, demand response) showing how the 10-cent answer changes |
+| 2 (mall sales) | Item-level kopi quantities + daily takings for mall outlets; POS missing dates; or confirm unavailable | "No more mall data. I told you on 18 Nov: the POS table is all there is." | Mall stalls (ORC/VIV/JEM/PGL): POS table is sole source — **state the limitation in every finding that uses them** (rule from pt 4 stands) |
+| 3 (staffing) | Overstaffing benchmark; scheduled vs actual cost; payroll hours | "No benchmark, no payroll. Use the roster." | Labour = **June 2026 roster scheduled hours × rate (TBC → $13)** vs that month's takings, by outlet; state assumptions (no benchmark, scheduled not actual, one month only) |
+| 4 (wastage) | Dated wastage records beyond BDK-01/WDL-01; else prospective weighing + owner | "No other wastage records. I am not starting a weighing process three days before your demo; put it in your recommendations." | Compare **BDK-01 vs WDL-01 only** (like for like); add **standardized chain-wide daily weighing** to the recommendations section of the final report |
+| 5 (invoices) | Clearer copies of unreadable unit prices; invoices after 12 Jun 2026 | "The 69 scans are all of them. Nothing after June." | 69 = complete set (re-confirmed); cost trend runs **through Jun 2026**; legibility gap (7/12 Heng Huat scans legible) → present as **directional**, state the assumption |
+
+**Overall client instruction (24 Nov):** "On Friday I want a working app that answers from my data and tells me plainly what it assumed. Spend the next three days on that." → app behaviour: every answer cites source + states assumptions; no unstated figures; no further data requests before the 27 Nov demo.
