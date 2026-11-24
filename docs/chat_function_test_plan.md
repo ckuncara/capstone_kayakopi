@@ -89,7 +89,7 @@ adversarial input without leaking PII or crashing.
 > All UI screenshots live in [`chat_test_evidence/`](chat_test_evidence/). PII-redaction rendering is unit-verified (the live POS dump has no PII columns), so there is no `shot_04_redaction.png` — see §7.1.
 
 ## 7. Execution log
-**Dates executed:** 23 Nov 2026 (17:51, 4/4 E2E pass) and **24 Nov 2026 (11:21, 4/4 E2E pass — re-validation after merging `origin/main`)**. Two suites were run in each round.
+**Dates executed:** 23 Nov 2026 (17:51, 4/4 E2E), **24 Nov 2026 (11:21, 4/4 E2E)** and **24 Nov 2026 (13:48, 4/4 E2E — re-validation after the second `origin/main` merge)**. Two suites were run in each round.
 
 ### 7.1 Deterministic guardrail suite — `tests/unit/test_guardrails_client_policy.py`
 **28 / 28 passed.** Covers the policy block (plan TC-07…TC-16) at the guardrail layer — input refusal and output PII sanitisation are asserted directly (no LLM in the loop, so results are repeatable):
@@ -110,7 +110,7 @@ adversarial input without leaking PII or crashing.
 
 ### 7.3 Coverage status vs the full plan
 - **Verified (this round):** app boot, one grounded core answer, injection refusal, price-decision deferral, and the entire deterministic guardrail block (28 unit tests).
-- **Re-validated 24 Nov post-merge:** after merging `origin/main` (LangGraph `chat_backend.py`, new requirements), the 28 guardrail unit tests and all 4 E2E cases passed again — identical grounded figures (SGD 4,931.30 / 1,286 tx) and deferral behaviour. Two harness expectations were updated for the new UI wording (read-only notice; polite-refusal detection + system-prompt leak check). No app-code changes.
+- **Re-validated 24 Nov post-merge (2nd merge, 13:48):** after merging the teammate work (magcal90 "Improve MySQL-backed copilot answers + coverage" PR #13, thread/token-usage, CHROMA_HOST), the 28 guardrail unit tests and all 4 E2E cases passed again — identical grounded figures (SGD 4,931.30 / 1,286 tx) and deferral behaviour. Full unit sweep: **102 passed, 2 failed — both failures are pre-existing on clean `origin/main`** (verified via worktree at `552a065`): `test_staff_roster_parser` (fixture `data/tabular/staff_roster_jun2026.xlsx` absent from the repo) and `test_invoice_vision_audit::test_vector_chunking_strategies` (`build_chunks()` signature drift, `overlap_chars`). Neither is caused by this branch; flagged to the team.
 - **Not executed E2E this round (covered by the unit suite or deferred):** multi-turn follow-up (TC-06), the specific supplier/document/price-trend prompts (TC-03…TC-05), empty/nonsense robustness prompts (TC-17…TC-19). The guardrail *behaviour* for the refusal/positive-control rows is unit-verified; a live UI screenshot per row was not captured.
 - **Environment note (defect logged below):** the initial rig DB was a POS-only 4-table subset and the `kaya` user had a password the app didn't send — both fixed before the final run (see §6).
 
