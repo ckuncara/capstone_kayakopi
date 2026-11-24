@@ -168,6 +168,42 @@ def retrieve_all_threads() -> list[str]:
     return thread_ids
 
 
+def get_thread_names() -> dict[str, str]:
+    """Return saved conversation names keyed by thread ID."""
+    with get_chatbot().checkpointer.cursor() as cursor:
+        cursor.execute(
+            "CREATE TABLE IF NOT EXISTS conversation_names (thread_id TEXT PRIMARY KEY, name TEXT NOT NULL)"
+        )
+        return dict(cursor.execute("SELECT thread_id, name FROM conversation_names").fetchall())
+
+
+def rename_thread(thread_id: str, name: str) -> None:
+    """Save a name for an existing conversation."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Conversation name cannot be empty.")
+    if len(name) > 80:
+        raise ValueError("Conversation name cannot exceed 80 characters.")
+    if thread_id not in retrieve_all_threads():
+        raise ValueError("Conversation no longer exists.")
+    get_thread_names()
+    with get_chatbot().checkpointer.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO conversation_names (thread_id, name) VALUES (?, ?) "
+            "ON CONFLICT(thread_id) DO UPDATE SET name=excluded.name",
+            (thread_id, name),
+        )
+
+
+def delete_thread(thread_id: str) -> None:
+    """Delete one conversation's checkpoints and name."""
+    checkpointer = get_chatbot().checkpointer
+    checkpointer.delete_thread(thread_id)
+    get_thread_names()
+    with checkpointer.cursor() as cursor:
+        cursor.execute("DELETE FROM conversation_names WHERE thread_id=?", (thread_id,))
+
+
 def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dict]]:
     """Stream one user turn through the LLM/tool loop, capturing token usage."""
     from langchain_core.messages import HumanMessage, AIMessage

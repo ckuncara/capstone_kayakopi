@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 
 import pymysql
@@ -45,6 +46,18 @@ class SkippedInvoice:
 def retry_invoice_upload(
     repo: SQLiteOpsRepository, vectors: SharedChromaRepository, upload_id: str, file_hash: str
 ) -> InvoiceSyncResult:
+    with closing(repo._connect()) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        superseded = conn.execute(
+            "SELECT file_hash FROM superseded_invoice_chunks WHERE upload_id=?", (upload_id,)
+        ).fetchall()
+        for entry in superseded:
+            old_hash = entry["file_hash"]
+            if not conn.execute(
+                "SELECT 1 FROM supplier_invoices WHERE file_hash=?", (old_hash,)
+            ).fetchone():
+                vectors.delete_invoice_document(old_hash)
+            conn.execute("DELETE FROM superseded_invoice_chunks WHERE file_hash=?", (old_hash,))
     record = repo.get_invoice_by_hash(file_hash)
     invoice = load_stored_invoice(repo, file_hash)
     audit = validate_invoice_calculations(invoice)
@@ -62,10 +75,11 @@ def upload_invoice(
     repo: SQLiteOpsRepository,
     vectors: SharedChromaRepository,
     budget: BudgetGuard,
+    force: bool = False,
 ) -> InvoiceUploadResult | SkippedInvoice:
     """Extract and persist an invoice, or skip it when already stored."""
     file_hash = repo.compute_hash(raw_bytes)
-    if repo.hash_exists(file_hash):
+    if not force and repo.hash_exists(file_hash):
         return SkippedInvoice("This invoice image is already stored.")
     with Image.open(io.BytesIO(raw_bytes)) as image:
         image_format = image.format
@@ -87,7 +101,7 @@ def upload_invoice(
     )
     if not invoice.invoice_number.strip() or not invoice.vendor_name.strip():
         raise ValueError("OCR must identify an invoice number and supplier name.")
-    if repo.invoice_number_exists(invoice.invoice_number):
+    if not force and repo.invoice_number_exists(invoice.invoice_number):
         return SkippedInvoice(f"Invoice number {invoice.invoice_number} is already stored.")
     repo.check_sync_identity(file_hash, invoice.invoice_number, invoice.vendor_name)
     audit = validate_invoice_calculations(invoice)
@@ -97,7 +111,7 @@ def upload_invoice(
     )
     repo.save_invoice(
         file_hash, None, stored_name, image_path, invoice, audit,
-        sync_mysql=True, allow_replace=False,
+        sync_mysql=True, allow_replace=force,
     )
     pending = next((entry for entry in pending_syncs(repo) if entry["file_hash"] == file_hash), None)
     if pending is None:
@@ -153,6 +167,11 @@ def render_invoice_upload_page() -> None:
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
     )
+    force = st.checkbox(
+        "Force upload existing invoices",
+        value=False,
+        help="Reprocess matching invoices and replace their stored data.",
+    )
     if st.button("Run OCR and save invoices", type="primary", disabled=not files):
         if not cfg.api_key:
             st.error("Set OPENAI_API_KEY before uploading invoices.")
@@ -161,7 +180,7 @@ def render_invoice_upload_page() -> None:
             try:
                 with st.spinner(f"Processing {file.name}..."):
                     vectors = SharedChromaRepository(cfg, budget_guard=budget)
-                    result = upload_invoice(file.getvalue(), cfg, repo, vectors, budget)
+                    result = upload_invoice(file.getvalue(), cfg, repo, vectors, budget, force=force)
             except BudgetExceededError as exc:
                 st.error(str(exc))
                 break

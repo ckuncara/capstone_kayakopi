@@ -75,6 +75,23 @@ class InvoiceDeletionTest(unittest.TestCase):
         self.assertEqual(pending_invoice_deletions(self.repo), [])
         self.assertEqual(delete_chunks.call_count, 2)
 
+    def test_deletion_retries_superseded_chunk_cleanup(self):
+        with self.repo._connect() as conn:
+            conn.execute("INSERT INTO mysql_invoice_sync VALUES ('upload', 'one', 'INV-1', 1)")
+            conn.execute("INSERT INTO superseded_invoice_chunks VALUES ('old', 'upload')")
+        delete_chunks = Mock(side_effect=[RuntimeError("Chroma unavailable"), None, None])
+        delete_mysql = Mock()
+        with self.assertRaisesRegex(RuntimeError, "Chroma unavailable"):
+            delete_invoice(self.repo, "one", delete_chunks, delete_mysql=delete_mysql)
+        self.assertEqual(pending_invoice_deletions(self.repo)[0]["file_hash"], "one")
+
+        delete_invoice(self.repo, "one", delete_chunks, delete_mysql=delete_mysql)
+
+        self.assertEqual(delete_chunks.call_args_list, [(("old",),), (("old",),), (("one",),)])
+        self.assertEqual(pending_invoice_deletions(self.repo), [])
+        with self.repo._connect() as conn:
+            self.assertEqual(conn.execute("SELECT * FROM superseded_invoice_chunks").fetchall(), [])
+
     def test_rejects_missing_invoice_or_shared_files_before_deletion(self):
         with self.assertRaisesRegex(ValueError, "No matching SQLite invoice"):
             delete_invoice(self.repo, "missing", Mock())

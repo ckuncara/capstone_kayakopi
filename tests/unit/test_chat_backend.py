@@ -1,11 +1,14 @@
 """Tests for recovery from interrupted tool calls."""
 
 import os
+import sqlite3
 import tempfile
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import Mock, patch
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from streamlit.testing.v1 import AppTest
 
 from kaya_kopi.copilot import chat_backend
 
@@ -34,6 +37,41 @@ class FakeModel:
 
 
 class ChatBackendTest(unittest.TestCase):
+    def test_names_and_deletes_only_selected_thread(self):
+        model = Mock()
+        model.bind_tools.return_value = model
+        model.invoke.return_value = AIMessage(content="Hello")
+        chat_backend.get_chatbot.cache_clear()
+        self.addCleanup(chat_backend.get_chatbot.cache_clear)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.dict(os.environ, {"OPENAI_API_KEY": "test", "KAYA_CHAT_DB": f"{directory}/chat.sqlite3"}), \
+             patch.object(chat_backend, "ChatOpenAI", return_value=model), \
+             patch.object(chat_backend, "ALL_TOOLS", []):
+            graph = chat_backend.get_chatbot()
+            for thread_id in ("first", "second"):
+                graph.invoke({"messages": [HumanMessage(content="Hi")]},
+                             {"configurable": {"thread_id": thread_id}})
+            chat_backend.rename_thread("first", "  Supplier review  ")
+            self.assertEqual(chat_backend.get_thread_names(), {"first": "Supplier review"})
+            with self.assertRaisesRegex(ValueError, "cannot be empty"):
+                chat_backend.rename_thread("first", "  ")
+            with self.assertRaisesRegex(ValueError, "no longer exists"):
+                chat_backend.rename_thread("missing", "Name")
+            chat_backend.get_chatbot.cache_clear()
+            self.assertEqual(chat_backend.get_thread_names(), {"first": "Supplier review"})
+
+            chat_backend.delete_thread("first")
+
+            self.assertEqual(chat_backend.retrieve_all_threads(), ["second"])
+            self.assertEqual(chat_backend.get_thread_names(), {})
+            with sqlite3.connect(f"{directory}/chat.sqlite3") as connection:
+                for table in ("checkpoints", "writes"):
+                    self.assertEqual(connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE thread_id=?", ("first",)
+                    ).fetchone()[0], 0)
+            state = chat_backend.get_chatbot().get_state({"configurable": {"thread_id": "second"}})
+            self.assertTrue(state.values["messages"])
+
     def test_repairs_only_missing_results_in_parallel_tool_calls(self):
         call = AIMessage(content="", tool_calls=[
             {"name": "first", "args": {}, "id": "1"},
@@ -70,3 +108,40 @@ class ChatBackendTest(unittest.TestCase):
             self.assertEqual(result.tool_call_id, "1")
             self.assertIn("interrupt", result.content.lower())
             self.assertIsInstance(messages[call_index + 2], HumanMessage)
+
+
+def test_conversation_sidebar_rename_and_delete(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = AIMessage(content="Hello")
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        graph = chat_backend.get_chatbot()
+        for thread_id in ("first", "second"):
+            graph.invoke({"messages": [HumanMessage(content="Hi")]},
+                         {"configurable": {"thread_id": thread_id}})
+        app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=30).run()
+        assert not app.exception
+        app.button(key="first").click().run()
+        assert app.session_state["thread_id"] == "first"
+        app.text_input(key="name_first").set_value("Supplier review").run()
+        app.button(key="save_first").click().run()
+        assert app.button(key="first").label == "Supplier review"
+        assert app.button(key="delete_first").disabled
+
+        app.checkbox(key="confirm_first").check().run()
+        app.button(key="delete_first").click().run()
+
+        assert not app.exception
+        assert app.session_state["thread_id"] not in ("first", "second")
+        assert app.session_state["message_history"] == []
+        assert chat_backend.retrieve_all_threads() == ["second"]
+        assert chat_backend.get_thread_names() == {}
+    finally:
+        chat_backend.get_chatbot.cache_clear()

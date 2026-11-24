@@ -143,6 +143,17 @@ def delete_invoice(
             if delete_mysql is None:
                 raise ValueError("MySQL cleanup is required for this invoice.")
             delete_mysql(sync["upload_id"])
+            for entry in conn.execute(
+                "SELECT file_hash FROM superseded_invoice_chunks WHERE upload_id=?",
+                (sync["upload_id"],),
+            ).fetchall():
+                if not conn.execute(
+                    "SELECT 1 FROM supplier_invoices WHERE file_hash=?", (entry["file_hash"],)
+                ).fetchone():
+                    delete_chunks(entry["file_hash"])
+            conn.execute(
+                "DELETE FROM superseded_invoice_chunks WHERE upload_id=?", (sync["upload_id"],)
+            )
             conn.execute("DELETE FROM mysql_invoice_sync WHERE upload_id = ?", (sync["upload_id"],))
         image, invoice_csv = _invoice_paths(repo, pending["filename"])
         _remove_from_master(repo.cfg.audited_csv_path, pending["invoice_number"])

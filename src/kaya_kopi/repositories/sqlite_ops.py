@@ -114,6 +114,11 @@ class SQLiteOpsRepository:
                     pending INTEGER NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS superseded_invoice_chunks (
+                    file_hash TEXT PRIMARY KEY,
+                    upload_id TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS api_usage_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     operation TEXT NOT NULL,
@@ -165,7 +170,7 @@ class SQLiteOpsRepository:
             """SELECT s.upload_id, s.invoice_number, i.vendor_name
                FROM mysql_invoice_sync s
                LEFT JOIN supplier_invoices i ON i.file_hash=s.file_hash
-               WHERE s.file_hash=? OR s.invoice_number=?""",
+               WHERE s.file_hash=? OR s.invoice_number=? COLLATE NOCASE""",
             (file_hash, invoice_number.strip()),
         ).fetchall()
         if len(rows) > 1:
@@ -236,18 +241,40 @@ class SQLiteOpsRepository:
         issues_json = json.dumps(audit["issues"])
 
         with self._connect() as conn:
-            if not allow_replace:
+            if sync_mysql or not allow_replace:
                 conn.execute("BEGIN IMMEDIATE")
+            replaced = None
+            if not allow_replace:
                 if conn.execute(
                     """SELECT 1 FROM supplier_invoices
                        WHERE file_hash=? OR invoice_number=? COLLATE NOCASE""",
                     (file_hash, invoice.invoice_number.strip()),
                 ).fetchone():
                     raise ValueError("This invoice image or invoice number is already stored.")
+            elif sync_mysql:
+                matches = conn.execute(
+                    """SELECT file_hash, invoice_number, vendor_name FROM supplier_invoices
+                       WHERE file_hash=? OR invoice_number=? COLLATE NOCASE""",
+                    (file_hash, invoice.invoice_number.strip()),
+                ).fetchall()
+                if len(matches) > 1:
+                    raise ValueError("The image and invoice number belong to different invoices.")
+                if matches:
+                    replaced = matches[0]
+                    if (not replaced["invoice_number"] or not replaced["vendor_name"]
+                            or replaced["invoice_number"].strip().upper() != invoice.invoice_number.strip().upper()
+                            or replaced["vendor_name"].strip().upper() != invoice.vendor_name.strip().upper()):
+                        raise ValueError("The existing invoice identity changed; resolve it before uploading.")
             if sync_mysql:
                 upload_id = self._sync_identity(
                     conn, file_hash, invoice.invoice_number, invoice.vendor_name
                 ) or uuid.uuid4().hex
+                if replaced is not None and replaced["file_hash"] != file_hash:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO superseded_invoice_chunks VALUES (?, ?)",
+                        (replaced["file_hash"], upload_id),
+                    )
+                conn.execute("DELETE FROM superseded_invoice_chunks WHERE file_hash=?", (file_hash,))
                 conn.execute(
                     """INSERT INTO mysql_invoice_sync (upload_id, file_hash, invoice_number, pending)
                        VALUES (?, ?, ?, 1)
@@ -255,6 +282,8 @@ class SQLiteOpsRepository:
                            invoice_number=excluded.invoice_number, pending=1""",
                     (upload_id, file_hash, invoice.invoice_number.strip()),
                 )
+                if replaced is not None:
+                    conn.execute("DELETE FROM supplier_invoices WHERE file_hash=?", (replaced["file_hash"],))
             conn.execute(
                 """
                 INSERT OR REPLACE INTO supplier_invoices (
