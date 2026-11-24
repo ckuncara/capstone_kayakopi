@@ -193,7 +193,7 @@ def test_vector_chunking_strategies():
     single = build_chunks("doc1", text="Hello world", strategy="single")
     assert len(single) == 1
 
-    exact = build_chunks("doc2", text="A" * 500, strategy="exact_count", num_chunks=4, overlap_chars=10)
+    exact = build_chunks("doc2", text="A" * 500, strategy="exact_count", num_chunks=4, chunk_overlap=10)
     assert len(exact) == 4
 
 
