@@ -118,10 +118,12 @@ CREATE TABLE IF NOT EXISTS supplier_invoice (
     supplier_purchase_id INT NULL UNIQUE,
     invoice_number VARCHAR(24) NOT NULL,
     supplier_name VARCHAR(120) NOT NULL,
-    supplier_address VARCHAR(255) NOT NULL,
-    gst_registration_number VARCHAR(30) NOT NULL,
-    invoice_date DATE NOT NULL,
-    bill_to VARCHAR(255) NOT NULL,
+    supplier_address VARCHAR(255) NULL,
+    gst_registration_number VARCHAR(30) NULL,
+    invoice_date DATE NULL,
+    bill_to VARCHAR(255) NULL,
+    currency CHAR(3) NOT NULL DEFAULT 'SGD',
+    is_gst_inclusive BOOLEAN NOT NULL DEFAULT FALSE,
     subtotal DECIMAL(12,2) NOT NULL,
     gst_rate_percent DECIMAL(5,2) NOT NULL,
     gst_amount DECIMAL(12,2) NOT NULL,
@@ -156,6 +158,23 @@ CREATE TABLE IF NOT EXISTS supplier_invoice_item (
     INDEX idx_invoice_item_description (description),
     CONSTRAINT fk_invoice_item_invoice FOREIGN KEY (supplier_invoice_id)
         REFERENCES supplier_invoice(supplier_invoice_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS ocr_invoice_sync (
+    upload_id CHAR(32) PRIMARY KEY,
+    supplier_invoice_id BIGINT NOT NULL UNIQUE,
+    created_invoice BOOLEAN NOT NULL,
+    CONSTRAINT fk_ocr_sync_invoice FOREIGN KEY (supplier_invoice_id)
+        REFERENCES supplier_invoice(supplier_invoice_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS ocr_invoice_source (
+    upload_id CHAR(32) NOT NULL,
+    source_document_id BIGINT NOT NULL UNIQUE,
+    PRIMARY KEY (upload_id, source_document_id),
+    CONSTRAINT fk_ocr_source_sync FOREIGN KEY (upload_id) REFERENCES ocr_invoice_sync(upload_id),
+    CONSTRAINT fk_ocr_source_document FOREIGN KEY (source_document_id)
+        REFERENCES source_document(source_document_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS purchase_invoice_reconciliation (

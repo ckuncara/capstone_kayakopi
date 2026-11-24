@@ -7,13 +7,16 @@ name = "kaya-kopi"
 version = "0.1.0"
 description = "Grounded operations copilot and ingestion pipeline for Kaya Kopi"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
+  "chromadb==1.5.9",
+  "langchain-chroma>=0.1,<2",
   "langchain-core>=0.3,<2",
   "langchain-openai>=0.2,<2",
   "langgraph>=0.2,<2",
   "langgraph-checkpoint-sqlite>=2,<4",
   "openpyxl>=3.1,<4",
+  "Pillow>=10,<13",
   "pydantic>=2,<3",
   "PyMySQL>=1.1,<2",
   "python-dotenv>=1,<2",
@@ -22,7 +25,6 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = [
-  "Pillow>=10,<13",
   "paddleocr>=3.3,<4",
   "paddlepaddle>=3.2,<4",
 ]

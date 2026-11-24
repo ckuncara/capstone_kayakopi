@@ -26,3 +26,5 @@ venv/
 # our runtime artifacts (spend tracker, evals report)
 spend_trace.jsonl
 evals_report.json
+.vscode
+

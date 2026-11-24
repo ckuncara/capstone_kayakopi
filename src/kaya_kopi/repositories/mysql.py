@@ -40,31 +40,40 @@ WITH invoice_line_totals AS (
     GROUP BY supplier_invoice_id
 ),
 canonical_invoice_cost AS (
-    SELECT i.supplier_invoice_id, i.invoice_number, i.supplier_name, i.invoice_date,
+    SELECT i.supplier_invoice_id, i.invoice_number, i.supplier_name, i.invoice_date, i.currency,
            CASE
+               WHEN i.currency <> 'SGD' THEN NULL
                WHEN i.arithmetic_valid = TRUE THEN i.subtotal
+               WHEN l.invalid_line_count = 0 AND i.is_gst_inclusive = TRUE
+                   THEN ROUND(l.line_subtotal / (1 + i.gst_rate_percent / 100), 2)
                WHEN l.invalid_line_count = 0 THEN l.line_subtotal
                ELSE NULL
            END AS canonical_subtotal,
            CASE
+               WHEN i.currency <> 'SGD' THEN NULL
                WHEN i.arithmetic_valid = TRUE THEN i.gst_amount
+               WHEN l.invalid_line_count = 0 AND i.is_gst_inclusive = TRUE
+                   THEN ROUND(l.line_subtotal - l.line_subtotal / (1 + i.gst_rate_percent / 100), 2)
                WHEN l.invalid_line_count = 0
                    THEN ROUND(l.line_subtotal * i.gst_rate_percent / 100, 2)
                ELSE NULL
            END AS canonical_gst,
            CASE
+               WHEN i.currency <> 'SGD' THEN NULL
                WHEN i.arithmetic_valid = TRUE THEN i.total_amount
+               WHEN l.invalid_line_count = 0 AND i.is_gst_inclusive = TRUE THEN l.line_subtotal
                WHEN l.invalid_line_count = 0
                    THEN ROUND(l.line_subtotal * (1 + i.gst_rate_percent / 100), 2)
                ELSE NULL
            END AS canonical_total,
            CASE
+               WHEN i.currency <> 'SGD' THEN 'NON_SGD'
                WHEN i.arithmetic_valid = TRUE THEN 'INVOICE_HEADER'
                WHEN l.invalid_line_count = 0 THEN 'VALIDATED_INVOICE_LINES'
                ELSE 'REVIEW_REQUIRED'
            END AS cost_basis,
            (i.extraction_status <> 'OK' OR i.arithmetic_valid = FALSE
-             OR l.invalid_line_count > 0) AS review_required
+             OR l.invalid_line_count > 0 OR i.currency <> 'SGD') AS review_required
     FROM supplier_invoice i
     LEFT JOIN invoice_line_totals l
       ON l.supplier_invoice_id=i.supplier_invoice_id
@@ -657,7 +666,7 @@ class MySQLRepository:
                            COALESCE(i.invoice_number, sp.invoice_no) AS invoice_number,
                            sp.supplier_name,
                            r.reconciliation_status, r.match_method, r.legacy_subtotal_sgd,
-                           r.scanned_subtotal_sgd, r.subtotal_difference_sgd
+                           r.scanned_subtotal_sgd, r.subtotal_difference_sgd, r.validation_status
                     FROM purchase_invoice_reconciliation r
                     JOIN supplier_purchases sp ON sp.purchase_id=r.supplier_purchase_id
                     LEFT JOIN supplier_invoice i ON i.supplier_invoice_id=r.supplier_invoice_id
@@ -667,19 +676,24 @@ class MySQLRepository:
             for row in rows:
                 identity_match = row["reconciliation_status"] == "MATCHED"
                 difference = row["subtotal_difference_sgd"]
-                amount_match = identity_match and difference is not None and Decimal(difference) == 0
+                needs_review = row["validation_status"] == "REVIEW_REQUIRED"
+                amount_match = None if needs_review else (
+                    identity_match and difference is not None and Decimal(difference) == 0
+                )
                 row.update(
                     {
                         "identity_match": identity_match,
                         "amount_match": amount_match,
                         "gst_responsible": False,
                         "gst_explanation": (
+                            "Reconciliation requires review after the invoice was updated."
+                            if needs_review else
                             "GST cannot explain this difference because both compared values are pre-GST subtotals."
                             if identity_match and not amount_match
                             else "GST is not part of this subtotal comparison."
                         ),
                         "cause": (
-                            "NO_SCAN"
+                            "REVIEW_REQUIRED" if needs_review else "NO_SCAN"
                             if not identity_match
                             else "AMOUNTS_AGREE" if amount_match else "UNDETERMINED"
                         ),
@@ -734,7 +748,7 @@ class MySQLRepository:
                        ROUND(SUM(c.canonical_gst),2) AS gst_sgd,
                        ROUND(SUM(c.canonical_total),2) AS total_sgd,
                        SUM(c.review_required) AS review_required_count
-                FROM canonical_invoice_cost c JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
+                FROM canonical_invoice_cost c LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
                 WHERE {' AND '.join(where)} GROUP BY {group_expr} ORDER BY {group_expr}""", params,
             )
             excluded_where = ["c.canonical_total IS NULL", *filters]
@@ -743,12 +757,25 @@ class MySQLRepository:
                 SELECT c.invoice_number, c.supplier_name, c.invoice_date,
                        c.cost_basis AS reason, d.source_uri
                 FROM canonical_invoice_cost c
-                JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
+                LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
                 JOIN supplier_invoice i ON i.supplier_invoice_id=c.supplier_invoice_id
                 JOIN source_document d ON d.source_document_id=i.source_document_id
                 WHERE {' AND '.join(excluded_where)}
                 ORDER BY c.invoice_date, c.invoice_number""",
                 params,
+            )
+            native_filters = [part.replace("c.", "i.") for part in filters]
+            foreign = self._query(
+                f"""
+                SELECT i.currency, {select_expr.replace("c.", "i.")},
+                       COUNT(*) AS invoice_count, ROUND(SUM(i.subtotal),2) AS subtotal,
+                       ROUND(SUM(i.gst_amount),2) AS gst, ROUND(SUM(i.total_amount),2) AS total
+                FROM supplier_invoice i
+                LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                WHERE {' AND '.join(["i.currency <> 'SGD'", "i.arithmetic_valid=TRUE", *native_filters])}
+                GROUP BY i.currency, {group_expr.replace("c.", "i.")}
+                ORDER BY i.currency, {group_expr.replace("c.", "i.")}
+                """, params,
             )
             return {
                 "analysis": analysis,
@@ -758,11 +785,22 @@ class MySQLRepository:
                 "included_invoice_count": sum(int(row["invoice_count"]) for row in rows),
                 "excluded_invoice_count": len(excluded),
                 "excluded_invoices": excluded,
-                "excluded_review_required_invoices": len(excluded),
+                "excluded_review_required_invoices": sum(
+                    row["reason"] != "NON_SGD" for row in excluded
+                ),
+                "excluded_non_sgd_invoices": sum(row["reason"] == "NON_SGD" for row in excluded),
+                "foreign_currency_results": foreign,
+                "foreign_currency_note": (
+                    "Separate native-currency totals include only arithmetically valid headers; "
+                    "no exchange rates are applied."
+                ),
                 "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
             }
         if analysis == "price_change":
-            where, params = ["li.line_total_valid=TRUE", "li.extraction_status='OK'"], []
+            where, params = [
+                "li.line_total_valid=TRUE", "li.extraction_status='OK'",
+                "i.currency='SGD'", "i.is_gst_inclusive=FALSE", "i.invoice_date IS NOT NULL",
+            ], []
             if supplier_query:
                 where.append("(s.supplier_code=%s OR i.supplier_name LIKE %s)")
                 params.extend([supplier_query.upper(), f"%{supplier_query}%"])
@@ -777,7 +815,7 @@ class MySQLRepository:
                            i.invoice_number, i.invoice_date, li.unit_price,
                            d.source_uri, li.line_number
                     FROM supplier_invoice_item li JOIN supplier_invoice i USING(supplier_invoice_id)
-                    JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                    LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
                     JOIN source_document d ON d.source_document_id=i.source_document_id
                     WHERE {' AND '.join(where)} ORDER BY s.supplier_code, li.description, i.invoice_date, i.supplier_invoice_id""", params,
             )
@@ -842,7 +880,7 @@ class MySQLRepository:
                 "insufficient_series_count": len(insufficient),
                 "insufficient_series": insufficient,
                 "largest_increase": comparable[0] if comparable else None,
-                "comparison_basis": "First versus latest validated unit price for the same supplier and exact item description on different invoice dates; ranked by percentage change.",
+                "comparison_basis": "First versus latest validated SGD GST-exclusive unit price for the same supplier and exact item description on different invoice dates; ranked by percentage change.",
                 "authority": "VALIDATED_SCANNED_INVOICE_LINES",
                 "citation": {"source_locator": "table=supplier_invoice_item"},
             }
@@ -854,7 +892,8 @@ class MySQLRepository:
             """
             SELECT i.supplier_invoice_id, i.invoice_number, sp.supplier_code,
                    i.supplier_name, i.supplier_address,
-                   i.gst_registration_number, i.invoice_date, i.bill_to, i.subtotal,
+                   i.gst_registration_number, i.invoice_date, i.bill_to, i.currency,
+                   i.is_gst_inclusive, i.subtotal,
                    i.gst_rate_percent, i.gst_amount, i.total_amount, i.payment_terms,
                    i.received_condition, i.mean_ocr_confidence, i.arithmetic_valid,
                    i.extraction_status, i.review_notes, i.supplier_purchase_id,
@@ -862,7 +901,7 @@ class MySQLRepository:
                    r.reconciliation_status, r.match_method, r.subtotal_difference_sgd,
                    s.source_uri, s.ocr_json_uri
             FROM supplier_invoice i
-            JOIN supplier sp ON UPPER(sp.canonical_name)=UPPER(i.supplier_name)
+            LEFT JOIN supplier sp ON UPPER(sp.canonical_name)=UPPER(i.supplier_name)
             JOIN source_document s ON s.source_document_id=i.source_document_id
             LEFT JOIN supplier_purchases p ON p.purchase_id=i.supplier_purchase_id
             LEFT JOIN purchase_invoice_reconciliation r
@@ -898,12 +937,20 @@ class MySQLRepository:
             canonical_total = Decimal(invoice["total_amount"])
             cost_basis = "INVOICE_HEADER"
         elif lines_are_valid:
-            canonical_subtotal = sum(Decimal(item["amount"]) for item in items)
+            line_total = sum(Decimal(item["amount"]) for item in items)
             gst_rate = Decimal(invoice["gst_rate_percent"]) / Decimal("100")
-            canonical_gst = (canonical_subtotal * gst_rate).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            canonical_total = canonical_subtotal + canonical_gst
+            if invoice["is_gst_inclusive"]:
+                canonical_total = line_total
+                canonical_subtotal = (line_total / (1 + gst_rate)).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                canonical_gst = canonical_total - canonical_subtotal
+            else:
+                canonical_subtotal = line_total
+                canonical_gst = (canonical_subtotal * gst_rate).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                canonical_total = canonical_subtotal + canonical_gst
             cost_basis = "VALIDATED_INVOICE_LINES"
         else:
             canonical_subtotal = canonical_gst = canonical_total = None
@@ -914,9 +961,13 @@ class MySQLRepository:
             "invoice": invoice,
             "items": items,
             "canonical_cost": {
-                "subtotal_sgd": f"{canonical_subtotal:.2f}" if canonical_subtotal is not None else None,
-                "gst_sgd": f"{canonical_gst:.2f}" if canonical_gst is not None else None,
-                "total_sgd": f"{canonical_total:.2f}" if canonical_total is not None else None,
+                "currency": invoice["currency"],
+                "subtotal": f"{canonical_subtotal:.2f}" if canonical_subtotal is not None else None,
+                "gst": f"{canonical_gst:.2f}" if canonical_gst is not None else None,
+                "total": f"{canonical_total:.2f}" if canonical_total is not None else None,
+                "subtotal_sgd": f"{canonical_subtotal:.2f}" if canonical_subtotal is not None and invoice["currency"] == "SGD" else None,
+                "gst_sgd": f"{canonical_gst:.2f}" if canonical_gst is not None and invoice["currency"] == "SGD" else None,
+                "total_sgd": f"{canonical_total:.2f}" if canonical_total is not None and invoice["currency"] == "SGD" else None,
                 "cost_basis": cost_basis,
                 "review_required": (
                     invoice["extraction_status"] != "OK"
@@ -943,7 +994,7 @@ class MySQLRepository:
             """
             SELECT DISTINCT s.supplier_code, i.supplier_name
             FROM supplier_invoice i
-            JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+            LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
             WHERE i.supplier_name LIKE %s OR s.supplier_code=%s
             ORDER BY i.supplier_name
             """,
@@ -973,6 +1024,7 @@ class MySQLRepository:
             FROM canonical_invoice_cost
             WHERE supplier_name IN ({placeholders})
               AND invoice_date BETWEEN %s AND %s
+              AND currency = 'SGD'
             GROUP BY DATE_FORMAT(invoice_date, '%%Y-%%m')
             ORDER BY month
             """,
@@ -993,6 +1045,8 @@ class MySQLRepository:
               AND li.description IS NOT NULL
               AND li.line_total_valid = TRUE
               AND li.extraction_status = 'OK'
+              AND i.currency = 'SGD'
+              AND i.is_gst_inclusive = FALSE
             GROUP BY DATE_FORMAT(i.invoice_date, '%%Y-%%m'), li.description
             ORDER BY month, li.description
             """,
@@ -1000,7 +1054,7 @@ class MySQLRepository:
         )
         evidence = self._query(
             f"""
-            SELECT i.invoice_number, i.invoice_date, i.extraction_status,
+            SELECT i.invoice_number, i.invoice_date, i.extraction_status, i.currency,
                    s.source_uri, s.ocr_json_uri
             FROM supplier_invoice i
             JOIN source_document s ON s.source_document_id=i.source_document_id
@@ -1020,6 +1074,10 @@ class MySQLRepository:
             "monthly": monthly,
             "item_trends": item_trends,
             "evidence": evidence,
+            "currency_note": (
+                "SGD totals exclude invoices in other currencies; no exchange rates are applied. "
+                "Item trends exclude GST-inclusive prices."
+            ),
             "method": "Uses scanned supplier invoices; rows marked REVIEW_REQUIRED remain disclosed in monthly counts.",
             "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
         }
