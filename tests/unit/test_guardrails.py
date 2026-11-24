@@ -68,7 +68,7 @@ def test_sensitive_details_are_redacted_but_supplier_address_can_be_shown():
     assert address in result
     assert "Example Pte Ltd" in result
     assert "M2-1234567-1" in result
-    for private in ("S1234567A", "9123 4567", "alex@example.com", "45 Hill Street"):
+    for private in ("S1234567A", "9123 4567", "alex@example.com", "45 Hill Street","654321"):
         assert private not in result
 
 
@@ -156,3 +156,34 @@ def test_outlet_totals_do_not_exempt_individual_pay(text):
 def test_payroll_source_reference_is_not_a_pay_disclosure():
     text = "Source: payroll.xlsx"
     assert protect_answer(text) == text
+
+
+@pytest.mark.parametrize("text", [
+    "Singapore 654321",
+    "SINGAPORE: 654321",
+    "Postal code: 654321",
+    "postal code - 654321",
+    "Postcode: 654321",
+    "Home address: 45 Hill Street, Singapore 654321",
+])
+def test_personal_postal_code_is_redacted(text):
+    result = protect_text(text)
+    assert "654321" not in result
+    assert "[REDACTED_" in result
+
+def test_unlabelled_six_digit_amount_is_not_redacted():
+    assert protect_text("Total expenses: SGD 654321") == (
+        "Total expenses: SGD 654321"
+    )
+
+@pytest.mark.parametrize("text", [
+    "Total expenses: SGD 654321",
+    "Invoice number: 654321",
+    "Singapore 6543210",
+])
+def test_other_numbers_are_preserved(text):
+    assert protect_text(text) == text
+
+def test_supplier_postal_code_is_preserved():
+    address = "123 Orchard Road, Singapore 123456"
+    assert protect_text(address, [address]) == address

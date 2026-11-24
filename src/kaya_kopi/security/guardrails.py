@@ -91,6 +91,11 @@ HOME_ADDRESS = re.compile(
     r"[^,\n;]{3,100}",
     re.I,
 )
+POSTAL_CODE = re.compile(
+    r"\b(?:Singapore|postal\s+code|postcode)\s*[:=-]?\s*"
+    r"(?<!\d)\d{6}(?!\w)",
+    re.I,
+)
 
 
 def _has_private_pay(text: str, require_details: bool = False) -> bool:
@@ -148,8 +153,9 @@ def protect_text(text: str, supplier_addresses: Iterable[str] = ()) -> str:
             marker = f"__SUPPLIER_ADDRESS_{index}__"
             saved[marker] = address
             text = text.replace(address, marker)
-    text = HOME_ADDRESS.sub("[REDACTED_ADDRESS]", text)
     text = STREET_ADDRESS.sub("[REDACTED_ADDRESS]", text)
+    text = POSTAL_CODE.sub("[REDACTED_POSTAL_CODE]", text)
+    text = HOME_ADDRESS.sub("[REDACTED_ADDRESS]", text)
     for marker, address in saved.items():
         text = text.replace(marker, address)
     return text
