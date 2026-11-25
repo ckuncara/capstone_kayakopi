@@ -7,7 +7,7 @@ name = "kaya-kopi"
 version = "0.1.0"
 description = "Grounded operations copilot and ingestion pipeline for Kaya Kopi"
 readme = "README.md"
-requires-python = ">=3.12,<3.14"
+requires-python = ">=3.12,<3.15"
 dependencies = [
   "chromadb==1.5.9",
   "langchain-chroma>=0.1,<2",
@@ -21,14 +21,16 @@ dependencies = [
   "pydantic>=2,<3",
   "PyMySQL>=1.1,<2",
   "python-dotenv>=1,<2",
-  "streamlit>=1.51,<2",
+  "sqlglot>=26,<31",
+  "streamlit>=1.37,<2",
 ]
 
 [project.optional-dependencies]
-ocr = [
-  "paddleocr>=3.3,<4",
-  "paddlepaddle>=3.2,<4",
-]
+# Disabled in favor of OpenAI Vision/OCR; uncomment if local PaddleOCR is needed again
+#ocr = [
+#  "paddleocr>=3.3,<4",
+#  "paddlepaddle>=3.2,<4",
+#]
 dev = [
   "pre-commit>=4,<5",
   "pytest>=8,<9",

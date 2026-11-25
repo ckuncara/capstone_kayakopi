@@ -22,3 +22,6 @@ venv/
 .DS_Store
 .runtime/
 .vscode
+
+# graphify output directory
+graphify-out/

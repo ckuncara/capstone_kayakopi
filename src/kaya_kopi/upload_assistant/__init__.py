@@ -1,0 +1,1 @@
+"""Independent upload-first assistant; does not modify the existing copilot."""
