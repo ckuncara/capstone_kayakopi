@@ -27,6 +27,8 @@ from kaya_kopi.paths import project_root  # noqa: E402
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository  # noqa: E402
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository  # noqa: E402
 from kaya_kopi.security.budget_guard import BudgetGuard  # noqa: E402
+from kaya_kopi.security.openai_proxy import openai_configured  # noqa: E402
+from kaya_kopi.security.supabase_auth import ensure_cli_sign_in  # noqa: E402
 
 SUPPORTED_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
@@ -222,8 +224,10 @@ def main() -> int:
         parser.error("output directory must not be inside the input directory")
     if args.limit < 0:
         parser.error("--limit must be non-negative")
-    if not cfg.api_key:
-        parser.error("OPENAI_API_KEY is not set in the environment or .env")
+    if not openai_configured(cfg):
+        parser.error("OpenAI access is not configured.")
+    if cfg.llm_proxy_url:
+        ensure_cli_sign_in(cfg)
 
     images = [
         path for path in sorted(input_dir.rglob("*"))

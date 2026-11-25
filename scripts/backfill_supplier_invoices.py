@@ -17,6 +17,7 @@ import mimetypes
 import sys
 from pathlib import Path
 
+import pymysql
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -27,9 +28,12 @@ from kaya_kopi.ingestion.parsers.invoice_vision_audit import (  # noqa: E402
     extract_invoice_with_openai,
     validate_invoice_calculations,
 )
+from kaya_kopi.repositories.mysql_invoice_sync import pending_syncs, sync_invoice  # noqa: E402
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository  # noqa: E402
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository  # noqa: E402
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard  # noqa: E402
+from kaya_kopi.security.openai_proxy import openai_configured  # noqa: E402
+from kaya_kopi.security.supabase_auth import ensure_cli_sign_in  # noqa: E402
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -42,8 +46,10 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = AppConfig()
-    if not args.dry_run and not cfg.api_key:
-        raise SystemExit("Error: OPENAI_API_KEY is not set in environment or .env")
+    if not args.dry_run and not openai_configured(cfg):
+        raise SystemExit("Error: OpenAI access is not configured.")
+    if not args.dry_run and cfg.llm_proxy_url:
+        ensure_cli_sign_in(cfg)
 
     repo = SQLiteOpsRepository(cfg)
     budget = BudgetGuard(cfg.sqlite_db_path, cfg.monthly_budget_usd)

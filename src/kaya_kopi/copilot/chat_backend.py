@@ -23,6 +23,8 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py)
 from kaya_kopi.copilot.tools import ALL_TOOLS
+from kaya_kopi.config import AppConfig
+from kaya_kopi.security.openai_proxy import openai_client_options
 from kaya_kopi.paths import project_root
 from kaya_kopi.security.guardrails import FINANCE_REFUSAL, protect_answer, protect_text, refuse_request
 
@@ -233,19 +235,20 @@ def _chat_database_path() -> Path:
 
 
 @lru_cache(maxsize=1)
-def get_chatbot():
+def get_chatbot(access_token: str | None = None):
     """Build and cache the persistent tool-calling graph."""
     load_dotenv(project_root() / ".env")
-    if not os.getenv("OPENAI_API_KEY"):
+    cfg = AppConfig()
+    if not cfg.llm_proxy_url and not cfg.api_key:
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Copy .env.example to .env and add the team API key."
         )
-
     model = ChatOpenAI(
         model=os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini"),
         temperature=0,
         timeout=30,
         max_retries=2,
+        **openai_client_options(cfg, "chat", access_token=access_token),
     )
     model_with_tools = model.bind_tools(ALL_TOOLS)
 
@@ -306,9 +309,9 @@ def get_chatbot():
     return graph.compile(checkpointer=checkpointer)
 
 
-def retrieve_all_threads() -> list[str]:
+def retrieve_all_threads(access_token: str | None = None) -> list[str]:
     """Return saved conversation IDs, newest checkpoint first."""
-    chatbot = get_chatbot()
+    chatbot = get_chatbot(access_token)
     seen: set[str] = set()
     thread_ids: list[str] = []
     for checkpoint in chatbot.checkpointer.list(None):
@@ -319,26 +322,26 @@ def retrieve_all_threads() -> list[str]:
     return thread_ids
 
 
-def get_thread_names() -> dict[str, str]:
+def get_thread_names(access_token: str | None = None) -> dict[str, str]:
     """Return saved conversation names keyed by thread ID."""
-    with get_chatbot().checkpointer.cursor() as cursor:
+    with get_chatbot(access_token).checkpointer.cursor() as cursor:
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS conversation_names (thread_id TEXT PRIMARY KEY, name TEXT NOT NULL)"
         )
         return dict(cursor.execute("SELECT thread_id, name FROM conversation_names").fetchall())
 
 
-def rename_thread(thread_id: str, name: str) -> None:
+def rename_thread(thread_id: str, name: str, access_token: str | None = None) -> None:
     """Save a name for an existing conversation."""
     name = protect_text(name.strip())
     if not name:
         raise ValueError("Conversation name cannot be empty.")
     if len(name) > 80:
         raise ValueError("Conversation name cannot exceed 80 characters.")
-    if thread_id not in retrieve_all_threads():
+    if thread_id not in retrieve_all_threads(access_token):
         raise ValueError("Conversation no longer exists.")
-    get_thread_names()
-    with get_chatbot().checkpointer.cursor() as cursor:
+    get_thread_names(access_token)
+    with get_chatbot(access_token).checkpointer.cursor() as cursor:
         cursor.execute(
             "INSERT INTO conversation_names (thread_id, name) VALUES (?, ?) "
             "ON CONFLICT(thread_id) DO UPDATE SET name=excluded.name",
@@ -346,16 +349,18 @@ def rename_thread(thread_id: str, name: str) -> None:
         )
 
 
-def delete_thread(thread_id: str) -> None:
+def delete_thread(thread_id: str, access_token: str | None = None) -> None:
     """Delete one conversation's checkpoints and name."""
-    checkpointer = get_chatbot().checkpointer
+    checkpointer = get_chatbot(access_token).checkpointer
     checkpointer.delete_thread(thread_id)
-    get_thread_names()
+    get_thread_names(access_token)
     with checkpointer.cursor() as cursor:
         cursor.execute("DELETE FROM conversation_names WHERE thread_id=?", (thread_id,))
 
 
-def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dict]]:
+def stream_chat(
+    thread_id: str, message: str, access_token: str | None = None
+) -> Iterator[tuple[BaseMessage, dict]]:
     """Stream one user turn through the LLM/tool loop, capturing token usage."""
     from langchain_core.messages import HumanMessage, AIMessage
     import streamlit as st
@@ -376,7 +381,7 @@ def stream_chat(thread_id: str, message: str) -> Iterator[tuple[BaseMessage, dic
     
     # Stream with stream_mode="updates" to capture token data
     # In "updates" mode, we get deltas like {"chat": state} or {"tools": state}
-    for update in get_chatbot().stream(
+    for update in get_chatbot(access_token).stream(
         {"messages": [HumanMessage(content=message, id=turn_id)]},
         config=config,
         stream_mode="updates",

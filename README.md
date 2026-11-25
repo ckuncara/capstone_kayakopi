@@ -54,9 +54,14 @@ it is intentionally not part of the automated test suite.
 
 ### LLM spend tracking
 
-The spend meter and usage log refresh every five seconds while their page is open. Usage is stored
-locally in the `llm_usage` table of `LOCAL_SQLITE_PATH` (Docker: `/workspace/data/kaya_ops.db`,
-mounted from `data/kaya_ops.db`). This is not a shared team ledger or a provider billing total.
+The spend meter and usage log refresh every five seconds while their page is open. Without `LLM_PROXY_URL`, usage is stored locally in the `llm_usage` table of `LOCAL_SQLITE_PATH`
+(Docker: `/workspace/data/kaya_ops.db`, mounted from `data/kaya_ops.db`). This local log is not a
+shared team ledger or a provider billing total. To route chat, vision OCR and embedding calls through
+the authenticated hosted proxy and store token/cost metadata in Supabase, follow
+[the hosted usage proxy setup](docs/implementation/openai-usage-proxy.md).
+With the proxy enabled, the sidebar shows the shared team estimate; the detailed local usage log
+and existing budget guard remain per-computer. The hosted total is an estimate, not a provider
+invoice or a global hard spending cap.
 Each model response in a streamed chat turn is logged, including tool-selection and final-answer
 calls. OCR and invoice chat use the same response-metadata logger; embeddings use provider counts.
 Log timestamps display in Singapore time (UTC+8); stored timestamps, monthly budgets, and billing

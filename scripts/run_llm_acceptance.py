@@ -8,6 +8,8 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 
 from kaya_kopi.copilot.chat_backend import get_chatbot
+from kaya_kopi.config import AppConfig
+from kaya_kopi.security.supabase_auth import ensure_cli_sign_in
 
 
 CASES = [
@@ -51,6 +53,9 @@ CASES = [
 
 
 def main() -> None:
+    cfg = AppConfig()
+    if cfg.llm_proxy_url:
+        ensure_cli_sign_in(cfg)
     chatbot = get_chatbot()
     for number, (question, expected) in enumerate(CASES, start=1):
         result = chatbot.invoke(
