@@ -15,6 +15,9 @@ from kaya_kopi.config import AppConfig
 from kaya_kopi.security.openai_proxy import set_proxy_access_token
 
 SESSION_KEY = "supabase_auth_session"
+REMEMBER_ME_KEY = "supabase_remember_me"
+SESSION_TIMEOUT_MINS = 10
+REMEMBER_ME_DAYS = 14
 
 
 def _auth_request(cfg: AppConfig, endpoint: str, payload: dict[str, str]) -> dict[str, Any]:
@@ -47,17 +50,24 @@ def _auth_request(cfg: AppConfig, endpoint: str, payload: dict[str, str]) -> dic
     return result
 
 
-def _expires_at(session: dict[str, Any]) -> float:
+def _expires_at(session: dict[str, Any], remember_me: bool = False) -> float:
     explicit = session.get("expires_at")
     if isinstance(explicit, (int, float)):
-        return float(explicit)
-    expires_in = session.get("expires_in")
-    if isinstance(expires_in, (int, float)):
-        return time.time() + float(expires_in)
-    return time.time() + 3600
+        expires_in = float(explicit) - time.time()
+    else:
+        expires_in = session.get("expires_in")
+        if not isinstance(expires_in, (int, float)):
+            expires_in = 3600
+        expires_in = float(expires_in)
+    
+    # If "Remember me" is checked, extend expiry to 14 days; otherwise use 10 mins
+    if remember_me:
+        return time.time() + (14 * 24 * 60 * 60)  # 14 days
+    else:
+        return time.time() + (SESSION_TIMEOUT_MINS * 60)  # 10 minutes
 
 
-def _save_session(session: dict[str, Any]) -> str:
+def _save_session(session: dict[str, Any], remember_me: bool = False) -> str:
     access_token = session.get("access_token")
     refresh_token = session.get("refresh_token")
     if not isinstance(access_token, str) or not isinstance(refresh_token, str):
@@ -65,18 +75,19 @@ def _save_session(session: dict[str, Any]) -> str:
     st.session_state[SESSION_KEY] = {
         "access_token": access_token,
         "refresh_token": refresh_token,
-        "expires_at": _expires_at(session),
+        "expires_at": _expires_at(session, remember_me),
     }
+    st.session_state[REMEMBER_ME_KEY] = remember_me
     return access_token
 
 
-def sign_in(cfg: AppConfig, email: str, password: str) -> str:
+def sign_in(cfg: AppConfig, email: str, password: str, remember_me: bool = False) -> str:
     session = _auth_request(
         cfg,
         "token?grant_type=password",
         {"email": email, "password": password},
     )
-    return _save_session(session)
+    return _save_session(session, remember_me)
 
 
 def current_access_token(cfg: AppConfig) -> str | None:
@@ -121,10 +132,11 @@ def render_sign_in(cfg: AppConfig) -> str | None:
     with st.form("supabase_sign_in"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
+        remember_me = st.checkbox(f"Remember me for {REMEMBER_ME_DAYS} days")
         submitted = st.form_submit_button("Sign in", type="primary")
     if submitted:
         try:
-            access_token = sign_in(cfg, email, password)
+            access_token = sign_in(cfg, email, password, remember_me)
         except RuntimeError as exc:
             st.error(str(exc))
         else:
