@@ -52,6 +52,24 @@ docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
 This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
 it is intentionally not part of the automated test suite.
 
+### Remembered sign-in
+
+When the hosted proxy is enabled, select **Remember me for 14 days** at sign-in to
+reopen the normal app URL in the same browser without signing in again. No bookmark
+or URL parameters are needed. A refresh token and the original 14-day deadline are
+stored in browser localStorage; access tokens stay in Streamlit session memory and
+are refreshed using Supabase's actual expiry. Refreshing does not extend that deadline.
+Signing out removes the remembered login. With the box unchecked, login stays in the
+current Streamlit session for up to 10 minutes and clears any previously remembered login.
+
+This requires Streamlit 1.51 or newer and browser site storage. Clearing site data,
+private browsing, changing the app's origin (including its port), or a revoked Supabase
+session can require signing in sooner. LocalStorage is accessible to scripts on the
+app's origin, so use HTTPS for hosted deployments and trusted frontend components.
+The 14-day deadline is an app persistence policy; configure Supabase session lifetime
+limits separately if a server-enforced maximum is required. Existing token-bearing
+bookmarks should be deleted; sign in again using the normal URL.
+
 ### LLM spend tracking
 
 The spend meter and usage log refresh every five seconds while their page is open. Without `LLM_PROXY_URL`, usage is stored locally in the `llm_usage` table of `LOCAL_SQLITE_PATH`
