@@ -277,6 +277,13 @@ export async function handleRequest(
     if (request.method === "GET" && path.endsWith("/healthz")) {
       return Response.json({ status: "ok" });
     }
+    if (request.method === "GET" && path.endsWith("/debug")) {
+      return Response.json({ 
+        status: "debug",
+        openaiKeyLength: settings.openaiApiKey?.length || 0,
+        supabaseUrlSet: !!settings.supabaseUrl,
+      });
+    }
     const prefix = "/openai-usage-proxy/v1/";
     const index = path.indexOf(prefix);
     if (
@@ -319,27 +326,40 @@ export async function handleRequest(
     };
     let upstream: Response;
     try {
-      upstream = await fetcher(`https://api.openai.com/v1/${endpoint}`, {
+      const fetchUrl = `https://api.openai.com/v1/${endpoint}`;
+      const cleanedKey = settings.openaiApiKey.trim();
+      console.log(`Calling OpenAI at ${fetchUrl} with key length: ${cleanedKey.length}`);
+      upstream = await fetcher(fetchUrl, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${settings.openaiApiKey}`,
+          Authorization: `Bearer ${cleanedKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(120_000),
       });
+      console.log(`OpenAI responded with status ${upstream.status}`);
     } catch (error) {
+      console.error(
+        "OpenAI request fetch error:",
+        error instanceof Error ? `${error.name}: ${error.message}` : "unknown error",
+      );
+      const errorMsg = error instanceof Error ? error.message : "unknown error";
       await recordEvent(settings, fetcher, {
         ...event,
         status: 502,
         errorCode: error instanceof Error ? error.name : "upstream_error",
       });
-      throw new ProxyError(502, "OpenAI request failed.");
+      throw new ProxyError(502, `OpenAI request failed: ${errorMsg}`);
     }
     let responseText: string;
     try {
       responseText = await upstream.text();
     } catch (error) {
+      console.error(
+        "OpenAI response read error:",
+        error instanceof Error ? error.message : "unknown error",
+      );
       await recordEvent(settings, fetcher, {
         ...event,
         status: 502,
@@ -360,6 +380,14 @@ export async function handleRequest(
     }
     const providerError = object(body.error);
     const providerErrorCode = providerError.code ?? providerError.type;
+    
+    if (!upstream.ok) {
+      console.error(
+        `OpenAI returned status ${upstream.status}:`,
+        providerError.message ?? "No error message",
+      );
+    }
+    
     const providerRequestId = upstream.headers.get("x-request-id");
     await recordEvent(settings, fetcher, {
       ...event,
