@@ -1,12 +1,32 @@
 # Hosted OpenAI usage tracking
 
 The optional authenticated proxy routes the app's OpenAI chat, vision OCR, and embedding requests
-through a Render-hosted Python service. The service keeps the OpenAI key server-side and records
-token and cost metadata in Supabase. It does not store prompts, responses, or image payloads.
+through a hosted service. Python and Supabase Edge Function implementations are available. The
+service keeps the OpenAI key server-side and records token and cost metadata in Supabase. It does
+not store prompts, responses, or image payloads.
 
 The current team usage total is a pricing estimate, not the OpenAI invoice. A request that bypasses
 the proxy is not recorded; rotate the shared OpenAI key after all clients have moved to proxy mode.
 The existing local `BudgetGuard` remains per-computer and does not enforce a team-wide spending cap.
+
+## Supabase Edge Function development
+
+The TypeScript implementation in `supabase/functions/openai-usage-proxy/` implements the same
+authenticated proxy contract using Supabase's Edge Runtime. It expects `OPENAI_API_KEY` and the
+Supabase-provided `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY` environment
+variables. Keep the platform's JWT verification enabled; the function also verifies the user with
+Supabase Auth before handling requests. Its proxy base URL ends in
+`/functions/v1/openai-usage-proxy`, without the trailing `/v1`.
+
+Run its isolated, mocked tests using Node.js 22.18 or newer:
+
+```bash
+node --test supabase/functions/openai-usage-proxy/handler.test.ts
+```
+
+The tests do not contact Supabase or OpenAI. Deployment and live verification are separate steps.
+
+## Render deployment
 
 ## 1. Configure Supabase
 
