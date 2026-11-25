@@ -32,7 +32,7 @@ def _restore_session_from_storage() -> None:
     if st.query_params.get("auth"):
         return
     
-    # Try to restore from localStorage
+    # Try to restore from localStorage with debug output
     st.components.v1.html(
         """
         <script>
@@ -41,13 +41,21 @@ def _restore_session_from_storage() -> None:
             const refresh = localStorage.getItem("supabase_refresh");
             const expires = localStorage.getItem("supabase_expires");
             
+            console.log("Restoring session from localStorage...");
+            console.log("Found auth:", !!auth);
+            console.log("Found refresh:", !!refresh);
+            console.log("Found expires:", !!expires);
+            
             if (auth && refresh && expires) {
-                // Update query params and reload page
+                console.log("Redirecting with tokens...");
                 const url = new URL(window.location);
                 url.searchParams.set("auth", auth);
                 url.searchParams.set("refresh", refresh);
                 url.searchParams.set("expires", expires);
+                console.log("New URL:", url.toString());
                 window.location.replace(url.toString());
+            } else {
+                console.log("No tokens found in localStorage");
             }
         }
         restoreSession();
@@ -126,12 +134,26 @@ def _save_session(session: dict[str, Any], remember_me: bool = False) -> str:
         st.query_params["expires"] = str(session_data["expires_at"])
         
         # Also save to localStorage so we can restore on browser restart
+        # Need to escape the token strings properly for JavaScript
+        import json
         st.components.v1.html(
             f"""
             <script>
-            localStorage.setItem("supabase_auth", "{access_token}");
-            localStorage.setItem("supabase_refresh", "{refresh_token}");
-            localStorage.setItem("supabase_expires", "{session_data['expires_at']}");
+            try {{
+                const tokens = {{
+                    auth: {json.dumps(access_token)},
+                    refresh: {json.dumps(refresh_token)},
+                    expires: {json.dumps(str(session_data['expires_at']))}
+                }};
+                localStorage.setItem("supabase_auth", tokens.auth);
+                localStorage.setItem("supabase_refresh", tokens.refresh);
+                localStorage.setItem("supabase_expires", tokens.expires);
+                console.log("✅ Tokens saved to localStorage");
+                console.log("Auth length:", tokens.auth.length);
+                console.log("Refresh:", tokens.refresh);
+            }} catch (e) {{
+                console.error("❌ Failed to save to localStorage:", e);
+            }}
             </script>
             """,
             height=0,
