@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: kaya-kopi-openai-proxy
+    runtime: docker
+    dockerfilePath: ./services/usage_proxy/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

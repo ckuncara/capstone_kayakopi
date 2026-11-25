@@ -336,8 +336,8 @@ def search_invoice_chroma(query: str, config: RunnableConfig) -> str:
     from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 
     context = _invoice_context(config)
-    if not context.cfg.api_key:
-        raise RuntimeError("An OpenAI API key is required to search invoice chunks.")
+    if not (context.cfg.llm_proxy_url or context.cfg.api_key):
+        raise RuntimeError("OpenAI access is not configured to search invoice chunks.")
     vec_repo = SharedChromaRepository(context.cfg, budget_guard=context.budget)
     hits = vec_repo.semantic_search(
         query_text=scrub_pdpa(query),

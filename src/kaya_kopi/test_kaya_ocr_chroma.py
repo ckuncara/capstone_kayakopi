@@ -2,7 +2,6 @@ from pathlib import Path
 import sys
 import streamlit as st
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
@@ -17,19 +16,33 @@ from kaya_kopi.ingestion.parsers.invoice_vision_audit import (  # noqa: E402
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository  # noqa: E402
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository  # noqa: E402
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard  # noqa: E402
+from kaya_kopi.security.openai_proxy import (  # noqa: E402
+    create_chat_model,
+    openai_configured,
+    set_proxy_access_token,
+)
 from kaya_kopi.security.pdpa_scrubber import scrub_pdpa  # noqa: E402
+from kaya_kopi.security.supabase_auth import render_sign_in  # noqa: E402
 
 st.set_page_config(page_title="Kaya Kopi OCR + ChromaDB Test Harness", layout="wide")
+default_cfg = AppConfig()
+access_token = render_sign_in(default_cfg) if default_cfg.llm_proxy_url else None
+if default_cfg.llm_proxy_url and access_token is None:
+    st.stop()
+set_proxy_access_token(access_token)
 st.title("Kaya Kopi — Supplier Invoice OCR & ChromaDB Test Harness")
 
-default_cfg = AppConfig()
 BRANCHES = ["HQ", "AMK-01", "AMK-03", "BDK-01", "JUR-01", "TAM-01", "TPY-02", "WDL-01", "YIS-02"]
 
 # --- Sidebar Configuration ---
 with st.sidebar:
     st.header("Test Configuration")
     branch_code = st.selectbox("Branch Tag", BRANCHES, index=0)
-    api_key = st.text_input("OpenAI API Key", type="password", value=default_cfg.api_key)
+    if default_cfg.llm_proxy_url:
+        st.caption("OpenAI calls use your authenticated team proxy.")
+        api_key = default_cfg.api_key
+    else:
+        api_key = st.text_input("OpenAI API Key", type="password", value=default_cfg.api_key)
 
     with st.expander("Model & Budget Overrides", expanded=False):
         ocr_model = st.text_input("OCR Model", value=default_cfg.ocr_model)
@@ -76,8 +89,8 @@ with tab_ocr:
     )
 
     if uploaded_files and st.button("Run OCR, Math Audit & Upsert to ChromaDB", type="primary"):
-        if not cfg.api_key:
-            st.error("Please enter your OpenAI API key in the sidebar.")
+        if not openai_configured(cfg):
+            st.error("OpenAI access is not configured.")
         else:
             vec_repo = SharedChromaRepository(cfg, budget_guard=budget)
 
@@ -204,8 +217,8 @@ with tab_chat:
                 st.caption("Source: SQLite invoice records")
                 sql_repo.log_chat(branch_code, scrubbed_q, scrub_pdpa(answer), "sqlite", 0.0)
                 st.session_state.test_chat_history.append({"role": "assistant", "content": answer})
-            elif not cfg.api_key:
-                st.error("Please enter your OpenAI API key in the sidebar for semantic search.")
+            elif not openai_configured(cfg):
+                st.error("OpenAI access is not configured for semantic search.")
             else:
                 try:
                     budget.check_budget_or_raise()
@@ -227,10 +240,11 @@ with tab_chat:
                             for m, doc in hits
                         )
 
-                        llm = ChatOpenAI(
-                            model=cfg.chat_model,
+                        llm = create_chat_model(
+                            cfg,
+                            cfg.chat_model,
+                            purpose="chat",
                             temperature=0.1,
-                            api_key=cfg.api_key,
                         )
                         response = llm.invoke(
                             [
@@ -274,8 +288,8 @@ with tab_chat:
 # ==============================================================================
 with tab_inspect:
     st.subheader("Stored ChromaDB Invoice Chunks")
-    if not cfg.api_key:
-        st.info("Enter your OpenAI API key in the sidebar to inspect ChromaDB.")
+    if not openai_configured(cfg):
+        st.info("OpenAI access is not configured.")
     else:
         vec_repo = SharedChromaRepository(cfg)
         col = vec_repo.get_collection()

@@ -3,6 +3,8 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+from kaya_kopi.config import AppConfig
+from kaya_kopi.security.openai_proxy import openai_client_options
 from kaya_kopi.security.budget_guard import BudgetGuard
 
 TOLERANCE = 0.02
@@ -51,10 +53,11 @@ def extract_invoice_with_openai(
     model_used = ocr_model or "gpt-4o-mini"
     b64_img = base64.b64encode(file_bytes).decode("utf-8")
 
+    cfg = AppConfig(api_key=api_key or "")
     llm = ChatOpenAI(
         model=model_used,
         temperature=0.0,
-        api_key=api_key or None,
+        **openai_client_options(cfg, "ocr", api_key=api_key),
     ).with_structured_output(InvoiceOCRResult, include_raw=True)
 
     messages = [

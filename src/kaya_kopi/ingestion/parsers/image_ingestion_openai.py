@@ -21,6 +21,8 @@ from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 from kaya_kopi.security.budget_guard import BudgetGuard
+from kaya_kopi.security.openai_proxy import openai_client_options, openai_configured
+from kaya_kopi.security.supabase_auth import ensure_cli_sign_in
 
 
 def sidecar_path(source: Path, image_root: Path, output_dir: Path) -> Path:
@@ -52,7 +54,11 @@ def ocr_other_image(
 
     image_bytes, mime_type = pipeline.prepare_openai_image(source, raw_bytes)
     budget.check_budget_or_raise()
-    response = ChatOpenAI(model=cfg.ocr_model, temperature=0.0, api_key=cfg.api_key).invoke(
+    response = ChatOpenAI(
+        model=cfg.ocr_model,
+        temperature=0.0,
+        **openai_client_options(cfg, "ocr"),
+    ).invoke(
         [
             SystemMessage(content="Transcribe all visible text in this image faithfully."),
             HumanMessage(
@@ -225,8 +231,10 @@ def main() -> int:
         parser.error("a partial input directory requires a separate --staging-dir")
     if staging_dir.is_relative_to(input_dir):
         parser.error("staging directory must be outside the input directory")
-    if not cfg.api_key:
-        parser.error("OPENAI_API_KEY is not set in the environment or .env")
+    if not openai_configured(cfg):
+        parser.error("OpenAI access is not configured.")
+    if cfg.llm_proxy_url:
+        ensure_cli_sign_in(cfg)
 
     images = [
         path for path in sorted(input_dir.rglob("*"))

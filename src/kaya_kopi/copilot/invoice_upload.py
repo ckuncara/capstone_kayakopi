@@ -28,6 +28,7 @@ from kaya_kopi.repositories.mysql_invoice_sync import (
 )
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard
+from kaya_kopi.security.openai_proxy import openai_configured
 
 
 @dataclass(frozen=True)
@@ -173,8 +174,8 @@ def render_invoice_upload_page() -> None:
         help="Reprocess matching invoices and replace their stored data.",
     )
     if st.button("Run OCR and save invoices", type="primary", disabled=not files):
-        if not cfg.api_key:
-            st.error("Set OPENAI_API_KEY before uploading invoices.")
+        if not openai_configured(cfg):
+            st.error("OpenAI access is not configured.")
             return
         for file in files:
             try:
