@@ -20,77 +20,6 @@ SESSION_TIMEOUT_MINS = 10
 REMEMBER_ME_DAYS = 14
 
 
-def _init_session_storage() -> None:
-    """Initialize browser localStorage for persistent sessions."""
-    if "session_storage_initialized" in st.session_state:
-        return
-    
-    st.session_state["session_storage_initialized"] = True
-    
-    # JavaScript to load session from localStorage on page load
-    st.components.v1.html(
-        """
-        <script>
-        function initSessionStorage() {
-            const sessionKey = "supabase_auth_session";
-            const rememberMeKey = "supabase_remember_me";
-            const sessionData = localStorage.getItem(sessionKey);
-            const rememberMe = localStorage.getItem(rememberMeKey);
-            
-            if (sessionData) {
-                // Set session data in browser's sessionStorage for Streamlit
-                sessionStorage.setItem(sessionKey, sessionData);
-            }
-            if (rememberMe) {
-                sessionStorage.setItem(rememberMeKey, rememberMe);
-            }
-        }
-        initSessionStorage();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _persist_to_browser(session_data: dict, remember_me: bool) -> None:
-    """Persist session data to browser localStorage."""
-    import json
-    
-    st.components.v1.html(
-        f"""
-        <script>
-        function persistSession() {{
-            const sessionData = {json.dumps(session_data)};
-            const rememberMe = {str(remember_me).lower()};
-            
-            if (rememberMe) {{
-                localStorage.setItem("supabase_auth_session", JSON.stringify(sessionData));
-                localStorage.setItem("supabase_remember_me", "true");
-            }} else {{
-                localStorage.removeItem("supabase_auth_session");
-                localStorage.removeItem("supabase_remember_me");
-            }}
-        }}
-        persistSession();
-        </script>
-        """,
-        height=0,
-    )
-
-
-def _clear_browser_session() -> None:
-    """Clear session from browser localStorage."""
-    st.components.v1.html(
-        """
-        <script>
-        localStorage.removeItem("supabase_auth_session");
-        localStorage.removeItem("supabase_remember_me");
-        </script>
-        """,
-        height=0,
-    )
-
-
 def _auth_request(cfg: AppConfig, endpoint: str, payload: dict[str, str]) -> dict[str, Any]:
     try:
         response = httpx.post(
@@ -153,9 +82,11 @@ def _save_session(session: dict[str, Any], remember_me: bool = False) -> str:
     st.session_state[SESSION_KEY] = session_data
     st.session_state[REMEMBER_ME_KEY] = remember_me
     
-    # Persist to browser if remember_me is checked
+    # Persist to query params if remember_me is checked
     if remember_me:
-        _persist_to_browser(session_data, True)
+        st.query_params["auth"] = access_token
+        st.query_params["refresh"] = refresh_token
+        st.query_params["expires"] = str(session_data["expires_at"])
     
     return access_token
 
@@ -172,36 +103,67 @@ def sign_in(cfg: AppConfig, email: str, password: str, remember_me: bool = False
 def current_access_token(cfg: AppConfig) -> str | None:
     # First check if we have a session in memory
     session = st.session_state.get(SESSION_KEY)
-    if not isinstance(session, dict):
-        # Try to initialize from browser storage on first load
-        _init_session_storage()
-        # On next run, the data will be in sessionStorage
-        return None
+    if isinstance(session, dict):
+        access_token = session.get("access_token")
+        refresh_token = session.get("refresh_token")
+        expires_at = session.get("expires_at")
+        if isinstance(access_token, str) and isinstance(refresh_token, str):
+            if isinstance(expires_at, (int, float)) and expires_at <= time.time() + 60:
+                try:
+                    refreshed = _auth_request(
+                        cfg,
+                        "token?grant_type=refresh_token",
+                        {"refresh_token": refresh_token},
+                    )
+                    remember_me = st.session_state.get(REMEMBER_ME_KEY, False)
+                    return _save_session(refreshed, remember_me)
+                except RuntimeError:
+                    st.session_state.pop(SESSION_KEY, None)
+                    st.query_params.clear()
+                    st.session_state["supabase_auth_error"] = (
+                        "Your session expired or could not be refreshed. Sign in again."
+                    )
+                    return None
+            return access_token
     
-    access_token = session.get("access_token")
-    refresh_token = session.get("refresh_token")
-    expires_at = session.get("expires_at")
-    if not isinstance(access_token, str) or not isinstance(refresh_token, str):
-        st.session_state.pop(SESSION_KEY, None)
-        _clear_browser_session()
-        return None
-    if isinstance(expires_at, (int, float)) and expires_at <= time.time() + 60:
+    # Try to restore from query parameters (for persistent "remember me" sessions)
+    auth_token = st.query_params.get("auth")
+    refresh_token = st.query_params.get("refresh")
+    expires_at = st.query_params.get("expires")
+    
+    if auth_token and refresh_token and expires_at:
         try:
-            refreshed = _auth_request(
-                cfg,
-                "token?grant_type=refresh_token",
-                {"refresh_token": refresh_token},
-            )
-            remember_me = st.session_state.get(REMEMBER_ME_KEY, False)
-            return _save_session(refreshed, remember_me)
-        except RuntimeError:
-            st.session_state.pop(SESSION_KEY, None)
-            _clear_browser_session()
-            st.session_state["supabase_auth_error"] = (
-                "Your session expired or could not be refreshed. Sign in again."
-            )
+            expires_at_float = float(expires_at)
+            # Check if token is still valid
+            if expires_at_float > time.time() + 60:
+                st.session_state[SESSION_KEY] = {
+                    "access_token": auth_token,
+                    "refresh_token": refresh_token,
+                    "expires_at": expires_at_float,
+                }
+                st.session_state[REMEMBER_ME_KEY] = True
+                return auth_token
+            else:
+                # Token expired, try to refresh
+                try:
+                    refreshed = _auth_request(
+                        cfg,
+                        "token?grant_type=refresh_token",
+                        {"refresh_token": refresh_token},
+                    )
+                    return _save_session(refreshed, remember_me=True)
+                except RuntimeError:
+                    st.query_params.clear()
+                    st.session_state["supabase_auth_error"] = (
+                        "Your session expired or could not be refreshed. Sign in again."
+                    )
+                    return None
+        except (ValueError, TypeError):
+            # Invalid query params, clear them
+            st.query_params.clear()
             return None
-    return access_token
+    
+    return None
 
 
 def render_sign_in(cfg: AppConfig) -> str | None:
@@ -234,7 +196,7 @@ def render_sign_in(cfg: AppConfig) -> str | None:
 def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop(REMEMBER_ME_KEY, None)
-    _clear_browser_session()
+    st.query_params.clear()
 
 
 def ensure_cli_sign_in(cfg: AppConfig) -> None:
