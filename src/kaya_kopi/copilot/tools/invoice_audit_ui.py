@@ -7,7 +7,6 @@ from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
     extract_invoice_with_openai,
     validate_invoice_calculations,
 )
-from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 from kaya_kopi.repositories.mysql_invoice_sync import (
@@ -231,12 +230,11 @@ def render_invoice_audit_panel() -> None:
                         ]
                     )
                     ans_text = str(resp.content)
-                    cost = budget.log_usage(
-                        "rag_chat",
-                        cfg.chat_model,
-                        estimate_tokens(ctx + scrubbed_q),
-                        estimate_tokens(ans_text),
-                        branch_code=None,
+                    cost = budget.log_response(
+                        thread_id="rag_chat",
+                        prompt=scrubbed_q,
+                        response=resp,
+                        requested_model=cfg.chat_model,
                     )
                     repo.log_chat(None, scrubbed_q, ans_text, "semantic_search", cost)
                     st.markdown(ans_text)

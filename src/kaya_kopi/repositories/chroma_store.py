@@ -15,7 +15,7 @@ class SharedChromaRepository:
     ):
         self.cfg = cfg
         self.collection_name = collection_name or cfg.chroma_collection
-        self.budget_guard = budget_guard
+        self.budget_guard = budget_guard or BudgetGuard(cfg.sqlite_db_path, cfg.monthly_budget_usd)
 
         if cfg.chroma_host:
             self.client = chromadb.HttpClient(host=cfg.chroma_host, port=cfg.chroma_port)
@@ -37,6 +37,21 @@ class SharedChromaRepository:
     def list_collections(self) -> list[str]:
         return [c.name for c in self.client.list_collections()]
 
+    def _embed(self, texts: list[str], thread_id: str, prompt: str) -> list[list[float]]:
+        self.budget_guard.check_budget_or_raise()
+        model_name = self.cfg.embed_model or "text-embedding-3-small"
+        response = self.embed_fn.client.embeddings.create(model=model_name, input=texts)
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "prompt_tokens", None)
+        self.budget_guard.log_usage(
+            thread_id=thread_id,
+            prompt=prompt,
+            model_name=getattr(response, "model", None) or model_name,
+            input_tokens=input_tokens,
+            output_tokens=0,
+        )
+        return [entry.embedding for entry in sorted(response.data, key=lambda entry: entry.index)]
+
     def upsert_chunks(
         self,
         parent_doc_id: str,
@@ -47,22 +62,14 @@ class SharedChromaRepository:
     ) -> int:
         if not chunks:
             return 0
-        if self.budget_guard:
-            self.budget_guard.check_budget_or_raise()
-
         col = self.get_collection()
-        col.delete(where={"parent_doc_id": parent_doc_id})
 
         ids: list[str] = []
         documents: list[str] = []
         metadatas: list[dict] = []
-        total_tokens = 0
-
         for ch in chunks:
             clean_text = scrub_pdpa(ch.text) if apply_pdpa_scrub else ch.text
             tokens = estimate_tokens(clean_text)
-            total_tokens += tokens
-
             ids.append(ch.chunk_id)
             documents.append(clean_text)
             metadata = {
@@ -77,16 +84,15 @@ class SharedChromaRepository:
                 metadata.pop("branch_code", None)
             metadatas.append(metadata)
 
-        col.upsert(ids=ids, documents=documents, metadatas=metadatas)
-
         if self.budget_guard:
-            self.budget_guard.log_usage(
-                operation="embedding",
-                model=self.cfg.embed_model,
-                prompt_tokens=total_tokens,
-                completion_tokens=0,
-                branch_code=branch_code,
+            embeddings = self._embed(
+                documents, thread_id=f"embedding:{parent_doc_id}", prompt=f"Embed {source_type}"
             )
+            col.delete(where={"parent_doc_id": parent_doc_id})
+            col.upsert(ids=ids, documents=documents, metadatas=metadatas, embeddings=embeddings)
+        else:
+            col.delete(where={"parent_doc_id": parent_doc_id})
+            col.upsert(ids=ids, documents=documents, metadatas=metadatas)
         return len(chunks)
 
     def ingest_document(
@@ -148,12 +154,10 @@ class SharedChromaRepository:
             where_clause = {"$and": filters}
 
         if self.budget_guard:
-            self.budget_guard.check_budget_or_raise()
-        res = col.query(
-            query_texts=[query_text],
-            n_results=min(n_results, total),
-            where=where_clause,
-        )
+            embedding = self._embed([query_text], thread_id="embedding:search", prompt="Embed search query")
+            res = col.query(query_embeddings=embedding, n_results=min(n_results, total), where=where_clause)
+        else:
+            res = col.query(query_texts=[query_text], n_results=min(n_results, total), where=where_clause)
         metadatas = res["metadatas"]
         documents = res["documents"]
         if metadatas is None or documents is None:

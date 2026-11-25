@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -228,6 +229,7 @@ class MySQLRepository:
         start_date: date | None = None,
         end_date: date | None = None,
         include_daily: bool = True,
+        *, include_report_dates: bool = False,
     ) -> dict[str, Any]:
         if (start_date is None) != (end_date is None):
             raise ValueError("start_date and end_date must either both be provided or both omitted")
@@ -277,6 +279,10 @@ class MySQLRepository:
                 }
                 for row in daily_rows
             ]
+            observed_period = {
+                "start": usable_rows[0]["business_date"] if usable_rows else None,
+                "end": usable_rows[-1]["business_date"] if usable_rows else None,
+            }
             return {
                 "outlet_code": outlet,
                 "alias_resolution": alias_resolution,
@@ -303,6 +309,9 @@ class MySQLRepository:
                     for row in daily_rows
                 ] if include_daily else [],
                 "coverage": {
+                    "observed_period": observed_period,
+                    **({"validated_report_dates": [row["business_date"] for row in usable_rows]}
+                       if include_report_dates else {}),
                     "source_period": {
                         "start": daily_source["first_date"],
                         "end": daily_source["last_date"],
@@ -313,7 +322,8 @@ class MySQLRepository:
                 "method": "Uses manager-entered daily Z-report summaries as the authoritative source for gross takings and receipts; missing dates are excluded and reported as gaps.",
                 "citation": {
                     "source_locator": "table=daily_outlet_summary",
-                    "records": citations,
+                    "source_uris": sorted({row["source_uri"] for row in citations}),
+                    **({"records": citations} if include_daily else {}),
                 },
             }
 
@@ -363,6 +373,10 @@ class MySQLRepository:
             },
             "daily": daily,
             "coverage": {
+                "observed_period": {
+                    "start": summary[0]["first_transaction"][:10] if summary else None,
+                    "end": summary[0]["last_transaction"][:10] if summary else None,
+                },
                 "warning": "No daily summary exists for this outlet. POS is a partial export and must not be treated as complete revenue or volume.",
                 "missing_dates": [],
             },
@@ -371,10 +385,94 @@ class MySQLRepository:
         }
 
     def analyze_outlets(
-        self, analysis: str, outlet_codes: list[str], start_date: date, end_date: date
+        self, analysis: str, outlet_codes: list[str], start_date: date | None,
+        end_date: date | None, outlet_type: str | None = None,
     ) -> dict[str, Any]:
+        if (start_date is None) != (end_date is None):
+            raise ValueError("provide both dates or omit both")
+        default_period = start_date is None
+        if default_period:
+            if analysis == "wastage":
+                bounds = self._query("""SELECT MIN(business_date) AS start, MAX(business_date) AS end
+                    FROM daily_outlet_summary WHERE wastage_kg IS NOT NULL""")[0]
+            elif analysis in {"staffing", "headcount"}:
+                bounds = self._query("""SELECT MAX(roster_month) AS start,
+                    LAST_DAY(MAX(roster_month)) AS end FROM staff_roster""")[0]
+            else:
+                raise ValueError("start_date and end_date are required for outlet performance")
+            if not bounds["start"]:
+                return {"analysis": analysis, "status": "NO_OBSERVATIONS", "results": []}
+            start_date, end_date = date.fromisoformat(bounds["start"]), date.fromisoformat(bounds["end"])
+
         _validate_period(start_date, end_date)
         selected = outlet_codes or sorted(self._canonical_outlets())
+        if outlet_type is not None:
+            matching = {row["outlet_code"] for row in self._query(
+                "SELECT outlet_code FROM outlets WHERE outlet_type = %s", (outlet_type,)
+            )}
+            selected = [code for code in selected if self._resolve_outlet(code, start_date, end_date)[0] in matching]
+        period = {"start": start_date.isoformat(), "end": end_date.isoformat()}
+        scope = {"period": period, "default_period": default_period, "outlet_type": outlet_type}
+        if analysis == "headcount":
+            requested_months = {
+                (start_date + timedelta(days=offset)).isoformat()[:7]
+                for offset in range((end_date - start_date).days + 1)
+            }
+            results = []
+            for requested_code in selected:
+                outlet, _alias = self._resolve_outlet(requested_code, start_date, end_date)
+                counts = self._query(
+                    """
+                    SELECT r.roster_month, TRIM(a.role) AS role,
+                           COUNT(DISTINCT a.staff_key) AS headcount
+                    FROM staff_assignment a
+                    JOIN staff_roster r ON r.staff_roster_id=a.staff_roster_id
+                    JOIN outlets o ON o.outlet_id=a.outlet_id
+                    WHERE o.outlet_code=%s
+                      AND r.roster_month <= %s
+                      AND LAST_DAY(r.roster_month) >= %s
+                    GROUP BY r.roster_month, TRIM(a.role)
+                    ORDER BY r.roster_month, role
+                    """,
+                    (outlet, end_date, start_date),
+                )
+                sources = self._query(
+                    """
+                    SELECT DISTINCT s.source_uri
+                    FROM staff_roster r
+                    JOIN source_document s ON s.source_document_id=r.source_document_id
+                    JOIN staff_assignment a ON a.staff_roster_id=r.staff_roster_id
+                    JOIN outlets o ON o.outlet_id=a.outlet_id
+                    WHERE o.outlet_code=%s
+                      AND r.roster_month <= %s
+                      AND LAST_DAY(r.roster_month) >= %s
+                    ORDER BY s.source_uri
+                    """,
+                    (outlet, end_date, start_date),
+                )
+                results.append({
+                    "outlet_code": outlet,
+                    "roster_available": bool(counts),
+                    "missing_roster_months": sorted(
+                        requested_months - {row["roster_month"][:7] for row in counts}
+                    ),
+                    "counts_by_month_and_role": counts,
+                    "citation": {
+                        "source_locator": "tables=staff_roster,staff_assignment",
+                        "source_uris": [row["source_uri"] for row in sources],
+                    },
+                })
+            return {
+                "analysis": analysis,
+                **scope,
+                "status": "COMPLETE" if results and all(
+                    not result["missing_roster_months"] for result in results
+                ) else "PARTIAL" if any(result["roster_available"] for result in results)
+                else "NO_OBSERVATIONS",
+                "results": results,
+                "definition": "Distinct rostered staff per outlet, role and month; not attendance or staff on duty at a particular time.",
+                "limitation": "Missing roster data is not zero staff. Do not sum monthly or role counts to infer unique staff across months or roles. Partial-month dates still describe the monthly roster.",
+            }
         if analysis == "wastage":
             results = []
             for requested_code in selected:
@@ -384,7 +482,9 @@ class MySQLRepository:
                     SELECT COUNT(d.daily_summary_id) AS reported_days,
                            COUNT(d.wastage_kg) AS measured_days,
                            ROUND(SUM(d.wastage_kg), 3) AS total_wastage_kg,
-                           ROUND(AVG(d.wastage_kg), 3) AS average_wastage_kg
+                           ROUND(AVG(d.wastage_kg), 3) AS average_wastage_kg,
+                           MIN(CASE WHEN d.wastage_kg IS NOT NULL THEN d.business_date END) AS first_measured,
+                           MAX(CASE WHEN d.wastage_kg IS NOT NULL THEN d.business_date END) AS last_measured
                     FROM outlets o
                     LEFT JOIN daily_outlet_summary d
                       ON d.outlet_id=o.outlet_id
@@ -399,6 +499,18 @@ class MySQLRepository:
                     coverage_status = "NOT_RECORDED"
                 else:
                     coverage_status = "MEASURED"
+                sources = self._query(
+                    """
+                    SELECT DISTINCT s.source_uri
+                    FROM daily_outlet_summary d
+                    JOIN outlets o ON o.outlet_id=d.outlet_id
+                    JOIN source_document s ON s.source_document_id=d.source_document_id
+                    WHERE o.outlet_code=%s AND d.business_date BETWEEN %s AND %s
+                      AND d.wastage_kg IS NOT NULL
+                    ORDER BY s.source_uri
+                    """,
+                    (outlet, start_date, end_date),
+                ) if row["measured_days"] else []
                 results.append(
                     {
                         "outlet_code": outlet,
@@ -407,8 +519,10 @@ class MySQLRepository:
                         "measured_days": row["measured_days"],
                         "total_wastage_kg": row["total_wastage_kg"],
                         "average_wastage_kg": row["average_wastage_kg"],
+                        "observed_period": {"start": row["first_measured"], "end": row["last_measured"]},
                         "citation": {
-                            "source_locator": "table=daily_outlet_summary;field=wastage_kg"
+                            "source_locator": "table=daily_outlet_summary;field=wastage_kg",
+                            "source_uris": [source["source_uri"] for source in sources],
                         },
                     }
                 )
@@ -417,11 +531,11 @@ class MySQLRepository:
                 key=lambda row: Decimal(row["total_wastage_kg"]),
                 reverse=True,
             )
-            all_comparable = len(measured) == len(results)
+            all_comparable = bool(measured) and len(measured) == len(results)
             return {
-                "status": "COMPLETE" if all_comparable else "PARTIAL",
+                "status": "COMPLETE" if all_comparable else "PARTIAL" if measured else "NO_OBSERVATIONS",
                 "analysis": analysis,
-                "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                **scope,
                 "definition": "Total weight of all food discarded at the outlet; not product-specific.",
                 "results": results,
                 "comparison_scope": "ALL_REQUESTED_OUTLETS" if all_comparable else "MEASURED_OUTLETS_ONLY",
@@ -430,7 +544,7 @@ class MySQLRepository:
                 "unmeasured_outlet_count": len(results) - len(measured),
                 "highest_measured_wastage": measured[0] if measured else None,
                 "ranked_measured_results": measured,
-                "limitation": "Only BDK-01 and WDL-01 record wastage; unrecorded outlets cannot be ranked.",
+                "limitation": "Only outlets with recorded measurements can be ranked. The ranking uses total measured kilograms, and measured-day counts can differ.",
             }
         if analysis == "staffing":
             weekday_names = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
@@ -453,50 +567,75 @@ class MySQLRepository:
             roster_by_outlet: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
                 roster_by_outlet.setdefault(row["outlet_code"], []).append(row)
+            period_days = (start_date + timedelta(days=offset)
+                           for offset in range((end_date - start_date).days + 1))
+            period_counts = Counter((day.isoformat()[:7], day.weekday()) for day in period_days)
+            requested_months = {month for month, _weekday in period_counts}
             results = []
             for requested_code in selected:
                 outlet, _alias = self._resolve_outlet(requested_code, start_date, end_date)
                 outlet_rows = roster_by_outlet.get(outlet, [])
+                sales = self.get_outlet_sales(
+                    outlet, start_date, end_date, include_daily=False, include_report_dates=True,
+                )
+                matched_days = set(sales["coverage"].get("validated_report_dates", []))
+                matched_counts = Counter((day[:7], date.fromisoformat(day).weekday()) for day in matched_days)
                 paid_hours = Decimal("0")
                 labour_cost = Decimal("0")
+                matched_hours = Decimal("0")
+                matched_labour_cost = Decimal("0")
                 defaulted_assignments: set[int] = set()
+                covered_months = {row["roster_month"][:7] for row in outlet_rows}
                 for row in outlet_rows:
-                    roster_month = date.fromisoformat(row["roster_month"])
-                    count = 0
-                    cursor = start_date
-                    while cursor <= end_date:
-                        if (cursor.year, cursor.month) == (roster_month.year, roster_month.month):
-                            count += cursor.weekday() == weekday_names.index(row["day_of_week"])
-                        cursor += timedelta(days=1)
-                    hours = Decimal(row["paid_hours"] or 0) * count
+                    key = (row["roster_month"][:7], weekday_names.index(row["day_of_week"]))
+                    shift_hours = Decimal(row["paid_hours"] or 0)
+                    hourly_rate = Decimal(row["hourly_rate_sgd"] or 0)
+                    hours = shift_hours * period_counts[key]
                     paid_hours += hours
-                    labour_cost += hours * Decimal(row["hourly_rate_sgd"] or 0)
+                    labour_cost += hours * hourly_rate
+                    hours_with_sales = shift_hours * matched_counts[key]
+                    matched_hours += hours_with_sales
+                    matched_labour_cost += hours_with_sales * hourly_rate
                     if row["rate_status"] == "CLIENT_APPROVED_DEFAULT":
                         defaulted_assignments.add(row["staff_assignment_id"])
-                sales = self.get_outlet_sales(outlet, start_date, end_date, include_daily=False)
-                gross = Decimal(
-                    sales["summary"].get(
-                        "gross_takings_sgd", sales["summary"].get("total_sales_sgd", "0")
-                    )
+                summary = sales["summary"]
+                authoritative = sales["authority"] == "DAILY_SUMMARY_Z_REPORT"
+                observations = summary["included_days"] if authoritative else summary["transaction_count"]
+                gross = Decimal(summary["total_sales_sgd"]) if observations else None
+                comparable = bool(
+                    authoritative and gross is not None and matched_hours > 0
+                    and requested_months <= covered_months
                 )
-                comparable = sales["authority"] == "DAILY_SUMMARY_Z_REPORT"
                 results.append(
                     {
                         "outlet_code": outlet,
                         "roster_available": bool(outlet_rows),
-                        "paid_hours": f"{paid_hours:.2f}",
-                        "labour_cost_sgd": f"{labour_cost:.2f}",
+                        "paid_hours": f"{paid_hours:.2f}" if outlet_rows else None,
+                        "labour_cost_sgd": f"{labour_cost:.2f}" if outlet_rows else None,
+                        "roster_months": sorted(covered_months),
                         "defaulted_rate_assignments": len(defaulted_assignments),
-                        "gross_takings_sgd": f"{gross:.2f}",
+                        "gross_takings_sgd": f"{gross:.2f}" if gross is not None and authoritative else None,
+                        "observed_pos_takings_sgd": f"{gross:.2f}" if gross is not None and not authoritative else None,
                         "revenue_authority": sales["authority"],
                         "productivity_comparable": comparable,
+                        "matched_paid_hours": f"{matched_hours:.2f}" if comparable else None,
+                        "matched_labour_cost_sgd": f"{matched_labour_cost:.2f}" if comparable else None,
                         "gross_takings_per_paid_hour_sgd": (
-                            f"{gross / paid_hours:.2f}" if paid_hours and comparable else None
+                            f"{gross / matched_hours:.2f}" if comparable else None
                         ),
                         "labour_cost_percent_of_takings": (
-                            f"{labour_cost / gross * 100:.2f}" if gross and comparable else None
+                            f"{matched_labour_cost / gross * 100:.2f}" if gross and comparable else None
                         ),
-                        "coverage": sales["coverage"],
+                        "coverage": {
+                            "sales_observations": observations,
+                            "observed_period": sales["coverage"].get("observed_period"),
+                            "missing_report_days": len(sales["coverage"].get("missing_dates", [])) if authoritative else None,
+                            "warning": sales["coverage"].get("warning"),
+                        },
+                        "citation": [sales["citation"], {
+                            "source_locator": "tables=staff_roster,staff_assignment,staff_shift",
+                            "source_uris": sorted({row["source_uri"] for row in outlet_rows}),
+                        }],
                     }
                 )
             comparable_outlets = sorted(
@@ -508,7 +647,7 @@ class MySQLRepository:
             ]
             return {
                 "analysis": analysis,
-                "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                **scope,
                 "results": results,
                 "classification": "NO_APPROVED_OVERSTAFFING_THRESHOLD",
                 "comparable_outlets": comparable_outlets,
@@ -516,8 +655,8 @@ class MySQLRepository:
                 "lowest_comparable_productivity": (
                     comparable_outlets[0] if comparable_outlets else None
                 ),
-                "conclusion": "No outlet can be classified as overstaffed without an approved threshold. Partial-POS outlets are excluded from productivity comparisons.",
-                "method": "Expands each weekly shift pattern only over matching weekdays in its roster month. TBC rates use the client-approved S$13/hour default.",
+                "conclusion": "Show scheduled labour cost and available takings separately. An overstaffing verdict needs an approved benchmark and reliable sales for the roster period. Partial POS takings cannot support a productivity ranking.",
+                "method": "Scheduled totals cover the requested roster period. Productivity ratios compare takings and rostered labour on the same validated Z-report dates, which may differ by outlet. TBC rates use the client-approved S$13/hour default.",
                 "privacy": "Individual staff names are not returned.",
             }
         if analysis != "performance":
@@ -528,23 +667,27 @@ class MySQLRepository:
                 requested_code, start_date, end_date, include_daily=False
             )
             summary = result["summary"]
+            observed = result["coverage"]["observed_period"]
             results.append(
                 {
                     "requested_outlet_code": requested_code.strip().upper(),
                     "outlet_code": result["outlet_code"],
                     "alias_resolution": result["alias_resolution"],
                     "authority": result["authority"],
-                    "gross_takings_sgd": summary.get(
-                        "gross_takings_sgd", summary["total_sales_sgd"]
-                    ),
-                    "receipt_count": summary.get("receipt_count"),
-                    "coverage": result["coverage"],
+                    "gross_takings_sgd": summary["total_sales_sgd"] if observed["start"] else None,
+                    "receipt_count": summary.get("receipt_count") if observed["start"] else None,
+                    "coverage": {
+                        "observed_period": observed,
+                        "missing_report_days": len(result["coverage"]["missing_dates"])
+                        if result["authority"] == "DAILY_SUMMARY_Z_REPORT" else None,
+                        "warning": result["coverage"].get("warning"),
+                    },
                     "citation": result["citation"],
                 }
             )
         return {
             "analysis": analysis,
-            "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+            **scope,
             "results": results,
         }
 
@@ -601,14 +744,71 @@ class MySQLRepository:
 
     def analyze_pos(
         self, analysis: str, outlet_codes: list[str], start_date: date, end_date: date,
-        menu_item: str | None = None,
+        menu_item: str | None = None, outlet_type: str | None = None,
     ) -> dict[str, Any]:
         _validate_period(start_date, end_date)
         selected = [self._resolve_outlet(code, start_date, end_date)[0] for code in outlet_codes]
+        if outlet_type is not None:
+            matching_outlets = {
+                row["outlet_code"] for row in self._query(
+                    "SELECT outlet_code FROM outlets WHERE outlet_type = %s", (outlet_type,)
+                )
+            }
+            if outlet_codes:
+                matching_outlets.intersection_update(selected)
+            selected = sorted(matching_outlets)
+
+        outlet_filter = bool(outlet_codes) or outlet_type is not None
+        outlet_condition = "FALSE"
+        if selected:
+            placeholders = ",".join(["%s"] * len(selected))
+            outlet_condition = f"p.canonical_outlet_code IN ({placeholders})"
+
+        period = {"start": start_date.isoformat(), "end": end_date.isoformat()}
+        if analysis == "margin":
+            if menu_item is not None and menu_item.strip().casefold() != "kopi":
+                raise ValueError("margin coverage is currently available only for the base Kopi item")
+
+            coverage = self._query(
+                POS_CTE + f"""
+                SELECT DATE(MIN(p.tx_time)) AS first_observed_date,
+                       DATE(MAX(p.tx_time)) AS last_observed_date,
+                       COUNT(CASE WHEN p.tx_time >= %s AND p.tx_time < %s THEN 1 END)
+                           AS observed_rows_in_period
+                FROM canonical_pos p JOIN menu_items m ON m.item_id = p.item_id
+                WHERE m.item_name = 'Kopi' AND {outlet_condition if outlet_filter else 'TRUE'}
+                """,
+                (start_date, end_date + timedelta(days=1), *selected),
+            )[0]
+            return {
+                "analysis": analysis,
+                "status": "INSUFFICIENT_EVIDENCE",
+                "margin_percent": None,
+                "menu_item": "Kopi",
+                "period": period,
+                "outlet_type": outlet_type,
+                "outlet_codes": selected if outlet_filter else sorted(self._canonical_outlets()),
+                "pos_coverage": {
+                    **coverage,
+                    "status": (
+                        "PARTIAL_OBSERVATIONS" if coverage["observed_rows_in_period"]
+                        else "NO_OBSERVATIONS"
+                    ),
+                },
+                "missing_for_margin": [
+                    "complete Kopi item sales for these outlets and dates",
+                    "approved recipe-level cost per cup for the requested period",
+                ],
+                "citation": {
+                    "source_uri": "data/sql/kayakopi_pos.sql",
+                    "source_locator": "tables=outlets,pos_transactions,menu_items",
+                },
+            }
+
         where = ["p.tx_time >= %s", "p.tx_time < %s"]
         params: list[Any] = [start_date, end_date + timedelta(days=1)]
-        if selected:
-            where.append(f"p.canonical_outlet_code IN ({','.join(['%s'] * len(selected))})")
+        if outlet_filter:
+            where.append(outlet_condition)
             params.extend(selected)
         if menu_item:
             where.append("m.item_name LIKE %s")
@@ -635,7 +835,7 @@ class MySQLRepository:
         return {
             "analysis": analysis,
             "authority": "PARTIAL_POS_EXPORT",
-            "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+            "period": period,
             "results": rows,
             "coverage_warning": "The POS export is incomplete. Results describe observed records only and must not be presented as complete revenue or volume.",
             "citation": {"source_uri": "data/sql/kayakopi_pos.sql", "source_locator": "tables=pos_transactions,menu_items"},
@@ -644,6 +844,7 @@ class MySQLRepository:
     def analyze_suppliers(
         self, analysis: str, supplier_query: str | None, invoice_number: str | None,
         start_date: date | None, end_date: date | None, group_by: str,
+        item: str | None = None, page: int = 1, detail_limit: int = 10,
     ) -> dict[str, Any]:
         if analysis == "invoice":
             if not invoice_number:
@@ -744,6 +945,7 @@ class MySQLRepository:
             rows = self._query(
                 CANONICAL_INVOICE_COST_CTE + f"""
                 SELECT {select_expr}, COUNT(*) AS invoice_count,
+                       MIN(c.invoice_date) AS first_invoice_date, MAX(c.invoice_date) AS last_invoice_date,
                        ROUND(SUM(c.canonical_subtotal),2) AS subtotal_sgd,
                        ROUND(SUM(c.canonical_gst),2) AS gst_sgd,
                        ROUND(SUM(c.canonical_total),2) AS total_sgd,
@@ -751,19 +953,28 @@ class MySQLRepository:
                 FROM canonical_invoice_cost c LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
                 WHERE {' AND '.join(where)} GROUP BY {group_expr} ORDER BY {group_expr}""", params,
             )
-            excluded_where = ["c.canonical_total IS NULL", *filters]
-            excluded = self._query(
+            review_where = ["(c.review_required OR c.canonical_total IS NULL)", *filters]
+            flagged = self._query(
                 CANONICAL_INVOICE_COST_CTE + f"""
                 SELECT c.invoice_number, c.supplier_name, c.invoice_date,
-                       c.cost_basis AS reason, d.source_uri
+                       c.cost_basis AS reason, d.source_uri, c.canonical_total IS NULL AS excluded,
+                       i.review_notes
                 FROM canonical_invoice_cost c
                 LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(c.supplier_name)
                 JOIN supplier_invoice i ON i.supplier_invoice_id=c.supplier_invoice_id
                 JOIN source_document d ON d.source_document_id=i.source_document_id
-                WHERE {' AND '.join(excluded_where)}
+                WHERE {' AND '.join(review_where)}
                 ORDER BY c.invoice_date, c.invoice_number""",
                 params,
             )
+            excluded = [
+                {key: row[key] for key in ("invoice_number", "supplier_name", "invoice_date", "reason", "source_uri")}
+                for row in flagged if row["excluded"]
+            ]
+            observed = {
+                "start": min((row["first_invoice_date"] for row in rows if row["first_invoice_date"]), default=None),
+                "end": max((row["last_invoice_date"] for row in rows if row["last_invoice_date"]), default=None),
+            }
             native_filters = [part.replace("c.", "i.") for part in filters]
             foreign = self._query(
                 f"""
@@ -780,11 +991,18 @@ class MySQLRepository:
             return {
                 "analysis": analysis,
                 "group_by": group_by,
+                "period": {
+                    "start": start_date.isoformat() if start_date else None,
+                    "end": end_date.isoformat() if end_date else None,
+                },
+                "observed_period": observed,
+                "supplier_query": supplier_query,
                 "results": rows,
                 "authority": "SCANNED_INVOICE_CANONICAL_COST",
                 "included_invoice_count": sum(int(row["invoice_count"]) for row in rows),
                 "excluded_invoice_count": len(excluded),
                 "excluded_invoices": excluded,
+                "reviewed_invoice_evidence": flagged,
                 "excluded_review_required_invoices": sum(
                     row["reason"] != "NON_SGD" for row in excluded
                 ),
@@ -797,94 +1015,184 @@ class MySQLRepository:
                 "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
             }
         if analysis == "price_change":
-            where, params = [
-                "li.line_total_valid=TRUE", "li.extraction_status='OK'",
-                "i.currency='SGD'", "i.is_gst_inclusive=FALSE", "i.invoice_date IS NOT NULL",
-            ], []
-            if supplier_query:
-                where.append("(s.supplier_code=%s OR i.supplier_name LIKE %s)")
-                params.extend([supplier_query.upper(), f"%{supplier_query}%"])
-            if start_date:
-                where.append("i.invoice_date >= %s")
-                params.append(start_date)
-            if end_date:
-                where.append("i.invoice_date <= %s")
-                params.append(end_date)
-            rows = self._query(
-                f"""SELECT s.supplier_code, i.supplier_name, li.description,
+            return self._supplier_price_change(supplier_query, start_date, end_date, item, page, detail_limit)
+        raise ValueError(f"unsupported supplier analysis: {analysis}")
+
+    def _supplier_price_change(
+        self, supplier_query: str | None, start_date: date | None, end_date: date | None,
+        item: str | None, page: int, detail_limit: int,
+    ) -> dict[str, Any]:
+        if start_date and end_date:
+            _validate_period(start_date, end_date)
+        if not 1 <= detail_limit <= 50 or not 1 <= page <= 1000:
+            raise ValueError("page must be 1–1000 and detail_limit must be 1–50")
+        filters = [
+            "li.line_total_valid=TRUE", "li.extraction_status='OK'", "li.unit_price IS NOT NULL",
+            "i.currency='SGD'", "i.is_gst_inclusive=FALSE", "i.invoice_date IS NOT NULL",
+        ]
+        params: list[Any] = []
+        if supplier_query:
+            filters.append("(s.supplier_code=%s OR i.supplier_name LIKE %s)")
+            params.extend([supplier_query.upper(), f"%{supplier_query}%"])
+        if item:
+            filters.append("li.description LIKE %s")
+            params.append(f"%{item.strip()}%")
+
+        # Rank the full eligible population before paging. Contradictory endpoint
+        # prices on the same invoice date make the series ineligible for comparison.
+        rows = self._query(
+            f"""WITH source_lines AS (
+                    SELECT s.supplier_code, i.supplier_name, li.description,
+                           CAST(i.supplier_name AS BINARY) AS supplier_name_key,
+                           CAST(li.description AS BINARY) AS description_key,
                            i.invoice_number, i.invoice_date, li.unit_price,
-                           d.source_uri, li.line_number
-                    FROM supplier_invoice_item li JOIN supplier_invoice i USING(supplier_invoice_id)
+                           d.source_uri, li.line_number, i.supplier_invoice_id
+                    FROM supplier_invoice_item li
+                    JOIN supplier_invoice i USING(supplier_invoice_id)
                     LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
                     JOIN source_document d ON d.source_document_id=i.source_document_id
-                    WHERE {' AND '.join(where)} ORDER BY s.supplier_code, li.description, i.invoice_date, i.supplier_invoice_id""", params,
-            )
-            grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-            for row in rows:
-                grouped.setdefault(
-                    (row["supplier_code"], row["supplier_name"], row["description"]), []
-                ).append(row)
-            comparable = []
-            insufficient = []
-            for (code, supplier_name, description), observations in grouped.items():
-                first, last = observations[0], observations[-1]
-                if len(observations) < 2 or first["invoice_date"] == last["invoice_date"]:
-                    insufficient.append(
-                        {
-                            "supplier_code": code,
-                            "supplier_name": supplier_name,
-                            "description": description,
-                            "observations": len(observations),
-                            "reason": "NEEDS_OBSERVATIONS_ON_DIFFERENT_DATES",
-                        }
+                    WHERE {' AND '.join(filters)}
+                ), requested AS (
+                    SELECT * FROM source_lines
+                    WHERE (%s IS NULL OR invoice_date >= %s)
+                      AND (%s IS NULL OR invoice_date <= %s)
+                ), ranked AS (
+                    SELECT requested.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY supplier_code, supplier_name_key, description_key
+                               ORDER BY invoice_date, supplier_invoice_id, line_number
+                           ) AS first_rank,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY supplier_code, supplier_name_key, description_key
+                               ORDER BY invoice_date DESC, supplier_invoice_id DESC, line_number DESC
+                           ) AS last_rank,
+                           MIN(unit_price) OVER date_prices AS min_price_on_date,
+                           MAX(unit_price) OVER date_prices AS max_price_on_date
+                    FROM requested
+                    WINDOW date_prices AS (
+                        PARTITION BY supplier_code, supplier_name_key, description_key, invoice_date
                     )
-                    continue
-                first_price, last_price = Decimal(first["unit_price"]), Decimal(last["unit_price"])
-                percent_change = (
-                    ((last_price - first_price) / first_price * 100).quantize(
-                        Decimal("0.01"), rounding=ROUND_HALF_UP
-                    )
-                    if first_price else None
+                ), series AS (
+                    SELECT supplier_code, supplier_name_key, description_key,
+                           MAX(supplier_name) AS supplier_name, MAX(description) AS description,
+                           COUNT(*) AS observations,
+                           MIN(invoice_date) AS first_date, MAX(invoice_date) AS latest_date,
+                           MAX(CASE WHEN first_rank=1 THEN unit_price END) AS first_price,
+                           MAX(CASE WHEN last_rank=1 THEN unit_price END) AS latest_price,
+                           MAX(CASE WHEN first_rank=1 THEN invoice_number END) AS first_invoice,
+                           MAX(CASE WHEN last_rank=1 THEN invoice_number END) AS latest_invoice,
+                           MAX(CASE WHEN first_rank=1 THEN source_uri END) AS first_uri,
+                           MAX(CASE WHEN last_rank=1 THEN source_uri END) AS latest_uri,
+                           MAX(CASE WHEN first_rank=1 THEN line_number END) AS first_line,
+                           MAX(CASE WHEN last_rank=1 THEN line_number END) AS latest_line,
+                           MAX(CASE WHEN first_rank=1 OR last_rank=1
+                               THEN min_price_on_date <> max_price_on_date END) AS ambiguous_endpoint
+                    FROM ranked GROUP BY supplier_code, supplier_name_key, description_key
+                ), comparable AS (
+                    SELECT *, (latest_price - first_price) / first_price * 100 AS percent_change
+                    FROM series
+                    WHERE first_date < latest_date AND first_price > 0 AND ambiguous_endpoint=0
+                ), detail_page AS (
+                    SELECT * FROM comparable
+                    ORDER BY percent_change DESC, supplier_code, supplier_name_key, description_key
+                    LIMIT %s OFFSET %s
+                ), coverage AS (
+                    SELECT (SELECT MIN(invoice_date) FROM source_lines) AS source_start,
+                           (SELECT MAX(invoice_date) FROM source_lines) AS source_end,
+                           (SELECT MIN(invoice_date) FROM requested) AS observed_start,
+                           (SELECT MAX(invoice_date) FROM requested) AS observed_end,
+                           (SELECT COUNT(*) FROM series) AS series_count,
+                           (SELECT COUNT(*) FROM comparable) AS comparable_count,
+                           (SELECT MAX(percent_change) FROM comparable) AS max_percent_change
                 )
-                comparable.append(
-                    {
-                        "supplier_code": code,
-                        "supplier_name": supplier_name,
-                        "description": description,
-                        "first_date": first["invoice_date"],
-                        "first_unit_price_sgd": f"{first_price:.4f}",
-                        "latest_date": last["invoice_date"],
-                        "latest_unit_price_sgd": f"{last_price:.4f}",
-                        "absolute_change_sgd": f"{last_price - first_price:.4f}",
-                        "percent_change": f"{percent_change:.2f}" if percent_change is not None else None,
-                        "observations": len(observations),
-                        "first_evidence": {
-                            "invoice_number": first["invoice_number"],
-                            "citation": f"{first['source_uri']}#invoice={first['invoice_number']};line={first['line_number']}",
-                        },
-                        "latest_evidence": {
-                            "invoice_number": last["invoice_number"],
-                            "citation": f"{last['source_uri']}#invoice={last['invoice_number']};line={last['line_number']}",
-                        },
-                    }
-                )
-            comparable.sort(
-                key=lambda row: Decimal(row["percent_change"]) if row["percent_change"] is not None else Decimal("-Infinity"),
-                reverse=True,
-            )
-            return {
-                "status": "PARTIAL" if insufficient else "COMPLETE",
-                "analysis": analysis,
-                "results": comparable,
-                "comparable_series_count": len(comparable),
-                "insufficient_series_count": len(insufficient),
-                "insufficient_series": insufficient,
-                "largest_increase": comparable[0] if comparable else None,
-                "comparison_basis": "First versus latest validated SGD GST-exclusive unit price for the same supplier and exact item description on different invoice dates; ranked by percentage change.",
-                "authority": "VALIDATED_SCANNED_INVOICE_LINES",
-                "citation": {"source_locator": "table=supplier_invoice_item"},
+                SELECT coverage.*, detail_page.* FROM coverage LEFT JOIN detail_page ON TRUE
+                ORDER BY percent_change DESC, supplier_code, supplier_name_key, description_key""",
+            [*params, start_date, start_date, end_date, end_date, detail_limit, (page - 1) * detail_limit],
+        )
+        totals = rows[0]
+        results = []
+        for row in rows:
+            if row["observations"] is None:
+                continue
+            evidence = {
+                f"{label}_evidence": {
+                    "invoice_number": row[f"{label}_invoice"],
+                    "citation": f"{row[f'{label}_uri']}#invoice={row[f'{label}_invoice']};line={row[f'{label}_line']}",
+                }
+                for label in ("first", "latest")
             }
-        raise ValueError(f"unsupported supplier analysis: {analysis}")
+            results.append({
+                **{key: row[key] for key in (
+                    "supplier_code", "supplier_name", "description", "first_date",
+                    "latest_date", "observations",
+                )},
+                "first_unit_price_sgd": f"{Decimal(row['first_price']):.4f}",
+                "latest_unit_price_sgd": f"{Decimal(row['latest_price']):.4f}",
+                "absolute_change_sgd": f"{Decimal(row['latest_price']) - Decimal(row['first_price']):.4f}",
+                "percent_change": f"{Decimal(row['percent_change']).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):.2f}",
+                **evidence,
+            })
+
+        comparable_count = totals["comparable_count"]
+        insufficient_count = totals["series_count"] - comparable_count
+        has_more = page * detail_limit < comparable_count
+        increased = comparable_count > 0 and Decimal(totals["max_percent_change"]) > 0
+        largest = results[0] if page == 1 and increased else None
+        status = "COMPLETE"
+        if not totals["series_count"]:
+            status = "NO_OBSERVATIONS"
+        elif not comparable_count:
+            status = "NO_COMPARABLE_SERIES"
+        elif not increased:
+            status = "NO_INCREASE_AMONG_COMPARABLE_SERIES"
+        elif insufficient_count or (
+            (start_date and start_date.isoformat() < totals["source_start"])
+            or (end_date and end_date.isoformat() > totals["source_end"])
+        ):
+            status = "PARTIAL"
+        return {
+            "analysis": "price_change",
+            "status": status,
+            "period": {
+                "start": start_date.isoformat() if start_date else None,
+                "end": end_date.isoformat() if end_date else None,
+            },
+            "observed_period": {"start": totals["observed_start"], "end": totals["observed_end"]},
+            "source_period": {"start": totals["source_start"], "end": totals["source_end"]},
+            "supplier_query": supplier_query,
+            "item": item,
+            "results": results,
+            "comparable_series_count": comparable_count,
+            "insufficient_series_count": insufficient_count,
+            "largest_increase": largest,
+            "detail_page": {"number": page, "next_page": page + 1 if has_more else None},
+            "comparison_basis": "Ranks changes in validated, GST-exclusive SGD unit prices for the same supplier and exact item description. Supporting rows are paged after ranking.",
+            "authority": "VALIDATED_SCANNED_INVOICE_LINES",
+            "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
+        }
+
+    def get_supplier_addresses(self, supplier_name: str) -> dict[str, Any]:
+        supplier = supplier_name.strip()
+        if len(supplier) < 2:
+            raise ValueError("supplier_name must contain at least two characters")
+        results = self._query(
+            """
+            SELECT DISTINCT
+                   i.supplier_name,
+                   i.supplier_address,
+                   CONCAT(s.source_uri, '#invoice=', i.invoice_number)
+                       AS invoice_reference
+            FROM supplier_invoice i
+            JOIN source_document s
+              ON s.source_document_id = i.source_document_id
+            WHERE UPPER(TRIM(i.supplier_name)) = UPPER(%s)
+              AND NULLIF(TRIM(i.supplier_address), '') IS NOT NULL
+            ORDER BY i.supplier_name, i.supplier_address, invoice_reference
+            LIMIT 10
+            """,
+            (supplier,),
+        )
+        return {"results": results}
 
     def get_invoice(self, invoice_number: str) -> dict[str, Any]:
         number = invoice_number.strip().upper()

@@ -10,7 +10,6 @@ if str(SRC_DIR) not in sys.path:
 
 from kaya_kopi.config import AppConfig  # noqa: E402
 from kaya_kopi.invoice_chat import sqlite_invoice_answer  # noqa: E402
-from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens  # noqa: E402
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import (  # noqa: E402
     extract_invoice_with_openai,
     validate_invoice_calculations,
@@ -249,12 +248,11 @@ with tab_chat:
                         )
                         answer = str(response.content)
 
-                        cost = budget.log_usage(
-                            operation="rag_chat_test",
-                            model=cfg.chat_model,
-                            prompt_tokens=estimate_tokens(context_str + scrubbed_q),
-                            completion_tokens=estimate_tokens(answer),
-                            branch_code=branch_code,
+                        cost = budget.log_response(
+                            thread_id=f"rag_chat_test:{branch_code}",
+                            prompt=scrubbed_q,
+                            response=response,
+                            requested_model=cfg.chat_model,
                         )
                         sql_repo.log_chat(branch_code, scrubbed_q, answer, "semantic_search", cost)
 

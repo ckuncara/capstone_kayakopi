@@ -3,7 +3,6 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
-from kaya_kopi.ingestion.parsers.vector_chunking import estimate_tokens
 from kaya_kopi.security.budget_guard import BudgetGuard
 
 TOLERANCE = 0.02
@@ -56,7 +55,7 @@ def extract_invoice_with_openai(
         model=model_used,
         temperature=0.0,
         api_key=api_key or None,
-    ).with_structured_output(InvoiceOCRResult)
+    ).with_structured_output(InvoiceOCRResult, include_raw=True)
 
     messages = [
         SystemMessage(
@@ -74,19 +73,22 @@ def extract_invoice_with_openai(
             ]
         ),
     ]
-    result: InvoiceOCRResult = llm.invoke(messages)
+    response = llm.invoke(messages)
+    result = response["parsed"]
 
     if budget_guard:
-        # Image vision prompt (~1200 tokens) + output tokens
-        out_tokens = estimate_tokens(result.model_dump_json())
-        budget_guard.log_usage(
-            operation="ocr_vision",
-            model=model_used,
-            prompt_tokens=1200,
-            completion_tokens=out_tokens,
-            branch_code=branch_code,
+        raw_message = response["raw"]
+        budget_guard.log_response(
+            thread_id=f"ocr_vision:{branch_code}" if branch_code else "ocr_vision",
+            prompt="Extract all structured fields and Markdown OCR text.",
+            response=raw_message,
+            requested_model=model_used,
         )
 
+    if response["parsing_error"]:
+        raise response["parsing_error"]
+    if not isinstance(result, InvoiceOCRResult):
+        raise ValueError("OpenAI did not return a parsed invoice.")
     return result
 
 

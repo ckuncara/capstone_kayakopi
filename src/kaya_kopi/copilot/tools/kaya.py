@@ -49,6 +49,13 @@ class InvoiceInput(BaseModel):
     invoice_number: str = Field(description="Invoice number such as INV-012508-182")
 
 
+class SupplierAddressInput(BaseModel):
+    supplier_name: str = Field(
+        min_length=2,
+        description="Full supplier name exactly as recorded on invoices; case is ignored",
+    )
+
+
 class SupplierTrendInput(BaseModel):
     supplier_name: str = Field(description="Full or partial supplier name")
     start_date: date = Field(description="Inclusive invoice start date in YYYY-MM-DD format")
@@ -70,21 +77,25 @@ class QualityIssuesInput(BaseModel):
 
 
 class AnalyzeOutletsInput(BaseModel):
-    analysis: Literal["performance", "wastage", "staffing"]
+    analysis: Literal["performance", "wastage", "staffing", "headcount"]
     outlet_codes: list[str] = Field(
         default_factory=list,
         max_length=12,
         description="Canonical, legacy, or re-registered outlet codes; verified aliases are resolved automatically. Leave empty for all outlets.",
     )
-    start_date: date
-    end_date: date
+    outlet_type: Literal["mall", "kopitiam"] | None = Field(default=None, description="Outlet master type")
+    start_date: date | None = Field(default=None, description="Omit both dates for the measured wastage period or latest roster month")
+    end_date: date | None = None
 
 
 class AnalyzePosInput(BaseModel):
-    analysis: Literal["product_mix", "observed_prices", "payment_modes", "time_of_day"]
+    analysis: Literal["product_mix", "observed_prices", "payment_modes", "time_of_day", "margin"]
     outlet_codes: list[str] = Field(default_factory=list, max_length=12)
-    start_date: date
-    end_date: date
+    outlet_type: Literal["mall", "kopitiam"] | None = Field(
+        default=None, description="Filter using the outlet master; use mall for mall outlets."
+    )
+    start_date: date = Field(description="Inclusive start date in YYYY-MM-DD format")
+    end_date: date = Field(description="Inclusive end date in YYYY-MM-DD format")
     menu_item: str | None = None
 
 
@@ -95,6 +106,9 @@ class AnalyzeSuppliersInput(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     group_by: Literal["all", "supplier", "month", "supplier_month"] = "supplier"
+    item: str | None = Field(default=None, description="Item description filter for price changes")
+    page: int = Field(default=1, ge=1, le=1000, description="Price-change detail page")
+    detail_limit: int = Field(default=10, ge=1, le=50, description="Price-change rows per page")
 
 
 class DataCoverageInput(BaseModel):
@@ -136,21 +150,30 @@ def _call(method: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
 @tool("analyze_outlets_sql", args_schema=AnalyzeOutletsInput)
 def analyze_outlets_sql(
     analysis: str,
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     outlet_codes: list[str] | None = None,
+    outlet_type: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze outlet performance, wastage, or staffing with source-authority and comparability rules. Use performance for gross takings/receipts, wastage for measured-only ranking, and staffing for paid-hours productivity. Verified outlet aliases are accepted."""
-    return _call("analyze_outlets", analysis, outlet_codes or [], start_date, end_date)
+    """Analyze outlet performance, measured wastage, scheduled staffing or roster headcounts.
+
+    Omit both dates for undated wastage or staffing questions. Use outlet_type='mall'
+    for mall stalls. On follow-ups, keep the previous dates and outlet filters except
+    where the user changes them. Report partial POS takings separately from labour cost.
+    Use headcount for staff counts by outlet and role (for example baristas); omit both
+    dates for the latest roster month. Headcounts are rostered staff, not attendance.
+    """
+    return _call("analyze_outlets", analysis, outlet_codes or [], start_date, end_date, outlet_type)
 
 
 @tool("analyze_pos_sql", args_schema=AnalyzePosInput)
 def analyze_pos_sql(
     analysis: str, start_date: date, end_date: date,
     outlet_codes: list[str] | None = None, menu_item: str | None = None,
+    outlet_type: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze product mix, observed prices, payments, or time patterns in the partial POS export."""
-    return _call("analyze_pos", analysis, outlet_codes or [], start_date, end_date, menu_item)
+    """Check Kopi margin evidence or analyze observed product mix, prices, payments, and time patterns."""
+    return _call("analyze_pos", analysis, outlet_codes or [], start_date, end_date, menu_item, outlet_type)
 
 
 @tool("analyze_suppliers_sql", args_schema=AnalyzeSuppliersInput)
@@ -158,9 +181,26 @@ def analyze_suppliers_sql(
     analysis: str, supplier_query: str | None = None, invoice_number: str | None = None,
     start_date: date | None = None, end_date: date | None = None,
     group_by: str = "supplier",
+    item: str | None = None, page: int = 1, detail_limit: int = 10,
 ) -> dict[str, Any]:
-    """Analyze scanned invoices and supplier evidence. Use spend with group_by=supplier_month for monthly spend; price_change for first/latest comparable invoice-line prices; reconciliation for purchase/scan identity and amount differences; invoice for one invoice."""
-    return _call("analyze_suppliers", analysis, supplier_query, invoice_number, start_date, end_date, group_by)
+    """Use MySQL for supplier spend, price changes, and invoice reconciliation.
+
+    Use supplier_month grouping for monthly spend. For price_change, cite the first and
+    latest invoice lines and report the observed period. Keep dates, supplier and item
+    on follow-ups unless changed. Use invoice to inspect a cited invoice's structured details.
+    """
+    return _call("analyze_suppliers", analysis, supplier_query, invoice_number, start_date, end_date, group_by, item, page, detail_limit)
+
+
+@tool("get_supplier_addresses_sql", args_schema=SupplierAddressInput)
+def get_supplier_addresses_sql(supplier_name: str) -> dict[str, Any]:
+    """Look up recorded supplier business addresses by exact supplier name, ignoring case.
+
+    Returns up to 10 invoice-backed records. Empty results mean no recorded address
+    matched that exact name. Report differing addresses with their invoice references;
+    do not infer which address is current.
+    """
+    return _call("get_supplier_addresses", supplier_name)
 
 
 @tool("get_data_coverage_sql", args_schema=DataCoverageInput)
@@ -321,6 +361,7 @@ ALL_TOOLS = [
     analyze_outlets_sql,
     analyze_pos_sql,
     analyze_suppliers_sql,
+    get_supplier_addresses_sql,
     get_data_coverage_sql,
     search_documents_sql,
     assess_kopi_price_change_sql,

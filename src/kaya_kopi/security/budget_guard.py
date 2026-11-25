@@ -1,12 +1,8 @@
 from pathlib import Path
-import sqlite3
 
-MODEL_PRICING_PER_1M = {
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-4o": {"input": 2.50, "output": 10.00},
-    "text-embedding-3-small": {"input": 0.02, "output": 0.00},
-    "text-embedding-3-large": {"input": 0.13, "output": 0.00},
-}
+from langchain_core.messages import AIMessage
+
+from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
 
 
 class BudgetExceededError(RuntimeError):
@@ -17,40 +13,17 @@ class BudgetGuard:
     def __init__(self, sqlite_path: Path, monthly_limit_usd: float = 50.0):
         self.sqlite_path = sqlite_path
         self.monthly_limit_usd = monthly_limit_usd
-
-    def _connect(self) -> sqlite3.Connection:
-        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.sqlite_path), timeout=15.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        return conn
+        self.usage_tracker = LLMUsageTracker(db_path=sqlite_path)
 
     def get_current_month_spend(self) -> float:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS api_usage_logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    operation TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    prompt_tokens INTEGER DEFAULT 0,
-                    completion_tokens INTEGER DEFAULT 0,
-                    cost_usd REAL DEFAULT 0.0,
-                    branch_code TEXT DEFAULT 'HQ',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-                """
-            )
-            row = conn.execute(
-                """
-                SELECT COALESCE(SUM(cost_usd), 0.0) AS spend
-                FROM api_usage_logs
-                WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now')
-                """
-            ).fetchone()
-            return float(row["spend"])
+        return self.usage_tracker.get_current_month_spend()
 
     def check_budget_or_raise(self) -> float:
+        if self.usage_tracker.get_unpriced_count(current_month=True):
+            raise BudgetExceededError(
+                "Monthly spend is incomplete: some API calls have no price or token usage. "
+                "Resolve missing usage/pricing before making further budget-guarded calls."
+            )
         current_spend = self.get_current_month_spend()
         if current_spend >= self.monthly_limit_usd:
             raise BudgetExceededError(
@@ -61,21 +34,17 @@ class BudgetGuard:
 
     def log_usage(
         self,
-        operation: str,
-        model: str,
-        prompt_tokens: int,
-        completion_tokens: int = 0,
-        branch_code: str | None = "HQ",
-    ) -> float:
-        rates = MODEL_PRICING_PER_1M.get(model, {"input": 0.15, "output": 0.60})
-        cost = (prompt_tokens * rates["input"] + completion_tokens * rates["output"]) / 1_000_000
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO api_usage_logs (
-                    operation, model, prompt_tokens, completion_tokens, cost_usd, branch_code
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (operation, model, prompt_tokens, completion_tokens, round(cost, 6), branch_code),
-            )
-        return cost
+        thread_id: str,
+        prompt: str,
+        model_name: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> float | None:
+        return self.usage_tracker.log_usage(
+            thread_id, prompt, model_name, input_tokens, output_tokens
+        )
+
+    def log_response(
+        self, thread_id: str, prompt: str, response: AIMessage, requested_model: str,
+    ) -> float | None:
+        return self.usage_tracker.log_response(thread_id, prompt, response, requested_model)

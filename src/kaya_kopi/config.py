@@ -1,8 +1,17 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+from kaya_kopi.paths import project_root
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _sqlite_db_path() -> Path:
+    load_dotenv(project_root() / ".env")
+    return Path(os.getenv("LOCAL_SQLITE_PATH", str(REPO_ROOT / "data" / "kaya_ops.db")))
 
 
 @dataclass(frozen=True)
@@ -26,9 +35,7 @@ class AppConfig:
             str(REPO_ROOT / "data" / "images" / "supplier_invoices" / "supplier_invoices_audited.csv"),
         )
     )
-    sqlite_db_path: Path = Path(
-        os.getenv("LOCAL_SQLITE_PATH", str(REPO_ROOT / "data" / "kaya_ops.db"))
-    )
+    sqlite_db_path: Path = field(default_factory=_sqlite_db_path)
     chroma_dir: Path = Path(
         os.getenv("LOCAL_CHROMA_DIR", str(REPO_ROOT / "data" / "local_chroma_db"))
     )
