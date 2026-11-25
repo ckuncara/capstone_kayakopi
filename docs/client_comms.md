@@ -38,6 +38,10 @@
 | 17 Nov | T→C | Email (drafted) | Client question — Team 1 | 9 data-audit questions (v1) prepared in `client_email_draft.md` | Merged to v2 (13 Qs) — Mike |
 | 18 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received**: Q1 answered (AMK-3A = 1 Jan 2026, alias of AMK-03) · Q2 answered (69 = complete) · Q3 **cut off in relay** ("3. POS export completeness. It") · roster attached | Log full reply in `client_qa.md` — Mike ⚠️ **rest of email (Q3–Q13) still missing** |
 | 18 Nov | C→T | Email attach | — | **Staff roster received**: `staff_roster_jun2026.xlsx` → saved `data/staff_roster_jun2026.xlsx` (Jun 2026, 12 outlets, 45 staff rows; 4 rates "TBC") | Unblocks Q12 / over-staffing answers |
+| 23 Nov | T→C | Email | Client question — Team 1 (RE) | Sent guardrail-policy confirmation Q14–Q23 (10 questions) in the existing thread; safe defaults stated; soft deadline Wed 25 Nov | Awaiting reply — Mike |
+| 23 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received — ALL 10 answered** (Q14–Q23): “Your defaults are fine” + per-question answers (Serene Lim). Full verbatim in `client_qa.md`; encoded in `src/kaya_kopi/guardrails.py` | ✅ Logged + policy in code 23 Nov — Mike |
+| 24 Nov | T→C | Email (draft) | Client question — Team 1 (RE) | New batch Q12–Q16 drafted in-thread: Q12 kopi margin + S$0.10 decision (recipe/portion spec, unit costs, target margin, demand evidence) · Q13 mall-outlet item-level sales + POS missing dates (or confirm unavailable) · Q14 staffing benchmark (labour % of takings / takings per paid hour, by outlet type; scheduled vs actual cost) · Q15 chain-wide wastage (records beyond BDK-01/WDL-01, else prospective daily weighing + owner) · Q16 invoice coverage (clearer scans of unreadable unit prices; invoices after 12 Jun 2026) | Mike — send, then log answers |
+| 24 Nov | C→T | Email | Client question — Team 1 (RE) | **Client reply received — all 5 points answered (Serene Lim): NO MORE DATA before demo.** (1) no recipe cards / target margin / price history → state assumptions + show how the answer changes · (2) no more mall data — POS table is all there is (re-confirms 18 Nov pt 4) · (3) no benchmark / payroll → use the roster · (4) no other wastage records → weighing process goes into recommendations · (5) 69 scans are all of them, nothing after June. Overall: "On Friday I want a working app that answers from my data and tells me plainly what it assumed." | ✅ Logged + answered 24 Nov — Mike; reply drafted `docs/email_reply_serene_24nov.md` |
 
 ---
 
@@ -85,7 +89,7 @@
 - Q11 — WASTAGE_KG = daily outlet-wide bin weight, not product-specific; only BDK-01 (Faridah) & WDL-01 record; others = "no data" (don't impute) — 18 Nov (pt 11)
 - ✅ **All 13 questions answered (18 Nov)** — reply signed **Serene Lim, Finance & Admin Manager, Kaya Kopi Holdings**
 - 📌 **New request (Serene Lim, 18 Nov):** cost trend from the invoices for the **10-cent kopi question** — ready before **demo day (27 Nov)**; build from paper invoices (source of truth per pt 7), not `total_amount`
-
+- ✅ **All 10 guardrail questions answered (23 Nov)** — Q14–Q23 (authorized users; named authors OK / no phone numbers; excerpts only; never show phone/email/home address/NRIC/individual pay rate — outlet pay totals OK; supplier names+GST OK; one access level; refuse bulk exports; keep traces 6 months w/ pt-4 redaction; refuse individual pay/performance/discipline + legal/tax → forward to client, prices = show numbers, boss decides; read-only confirmed). Encoded in `src/kaya_kopi/guardrails.py`
 ---
 
 ## Open items / blockers
@@ -125,3 +129,17 @@ I'll dedupe, send one batch to the client, and log every answer in
 docs/client_comms.md + docs/client_qa.md.
 Don't email the client directly — route through me so we ask once, clearly.
 ```
+
+## Drafted 20 Nov 2026, by Mike (for the existing client email thread)
+
+- Guardrail policy confirmation, Q14–Q23 (see `client_qa.md`), to be sent in the same thread.
+- Framing: safe defaults already in place (read-only, PII redaction, no bulk exports); client answers finalize the policy in code; soft deadline Wed 25 Nov ahead of the 27 Nov demo.
+- Status: **SENT 23 Nov in the same thread; reply received same day — all 10 answered**. Defaults confirmed by client; policy locked in code (`src/kaya_kopi/guardrails.py`); verbatim answers in `client_qa.md` (Q14–Q23).
+
+
+## Drafted 24 Nov 2026, by Mike (for the existing client email thread)
+
+- New batch Q12–Q16: Q12 kopi margin & the S$0.10 decision (recipe/portion spec current + historical, unit costs used by Finance, target margin, demand evidence) · Q13 complete mall-outlet sales evidence (item-level kopi quantities, daily takings, POS missing dates; or confirm unavailable) · Q14 staffing assessment (Finance/HR overstaffing benchmark, by outlet type; scheduled roster vs actual labour cost; attendance/payroll hours + mall takings if actual) · Q15 chain-wide wastage (dated records beyond BDK-01/WDL-01; else standardized daily weighing prospectively + owner) · Q16 invoice coverage (clearer copies where unit prices unreadable; supplier invoices after 12 Jun 2026).
+- Framing: directional kopi cost trend already built from legible scans (kopi/roast +5.5%, tea dust +12.9%, Aug 2025 → Jun 2026); these answers firm it up. Demo Fri 27 Nov — present directional findings with stated assumptions for anything still pending.
+- Status: **SENT 24 Nov — reply received same day; all 5 points answered (Serene Lim).** No more data to be provided before the demo.
+- Client directive (24 Nov): **work with the existing package only; every answer must state its assumptions; show how the 10-cent answer changes under different assumptions; weighing process → recommendations section.** Verbatim answers in `client_qa.md` (follow-up batch of 24 Nov). Reply drafted: `docs/email_reply_serene_24nov.md`.
