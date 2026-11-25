@@ -20,51 +20,6 @@ SESSION_TIMEOUT_MINS = 10
 REMEMBER_ME_DAYS = 14
 
 
-def _restore_session_from_storage() -> None:
-    """On page load, check localStorage for persisted query params and redirect if needed."""
-    # Only run once on initial page load
-    if "session_restore_attempted" in st.session_state:
-        return
-    
-    st.session_state["session_restore_attempted"] = True
-    
-    # Check if we already have query params
-    if st.query_params.get("auth"):
-        return
-    
-    # Try to restore from localStorage with debug output
-    st.components.v1.html(
-        """
-        <script>
-        function restoreSession() {
-            const auth = localStorage.getItem("supabase_auth");
-            const refresh = localStorage.getItem("supabase_refresh");
-            const expires = localStorage.getItem("supabase_expires");
-            
-            console.log("Restoring session from localStorage...");
-            console.log("Found auth:", !!auth);
-            console.log("Found refresh:", !!refresh);
-            console.log("Found expires:", !!expires);
-            
-            if (auth && refresh && expires) {
-                console.log("Redirecting with tokens...");
-                const url = new URL(window.location);
-                url.searchParams.set("auth", auth);
-                url.searchParams.set("refresh", refresh);
-                url.searchParams.set("expires", expires);
-                console.log("New URL:", url.toString());
-                window.location.replace(url.toString());
-            } else {
-                console.log("No tokens found in localStorage");
-            }
-        }
-        restoreSession();
-        </script>
-        """,
-        height=0,
-    )
-
-
 def _auth_request(cfg: AppConfig, endpoint: str, payload: dict[str, str]) -> dict[str, Any]:
     try:
         response = httpx.post(
@@ -127,37 +82,12 @@ def _save_session(session: dict[str, Any], remember_me: bool = False) -> str:
     st.session_state[SESSION_KEY] = session_data
     st.session_state[REMEMBER_ME_KEY] = remember_me
     
-    # Persist to query params AND localStorage if remember_me is checked
+    # Persist to query params if remember_me is checked
+    # Query params will be preserved when user bookmarks the URL or uses browser history
     if remember_me:
         st.query_params["auth"] = access_token
         st.query_params["refresh"] = refresh_token
         st.query_params["expires"] = str(session_data["expires_at"])
-        
-        # Also save to localStorage so we can restore on browser restart
-        # Need to escape the token strings properly for JavaScript
-        import json
-        st.components.v1.html(
-            f"""
-            <script>
-            try {{
-                const tokens = {{
-                    auth: {json.dumps(access_token)},
-                    refresh: {json.dumps(refresh_token)},
-                    expires: {json.dumps(str(session_data['expires_at']))}
-                }};
-                localStorage.setItem("supabase_auth", tokens.auth);
-                localStorage.setItem("supabase_refresh", tokens.refresh);
-                localStorage.setItem("supabase_expires", tokens.expires);
-                console.log("✅ Tokens saved to localStorage");
-                console.log("Auth length:", tokens.auth.length);
-                console.log("Refresh:", tokens.refresh);
-            }} catch (e) {{
-                console.error("❌ Failed to save to localStorage:", e);
-            }}
-            </script>
-            """,
-            height=0,
-        )
     
     return access_token
 
@@ -172,14 +102,16 @@ def sign_in(cfg: AppConfig, email: str, password: str, remember_me: bool = False
 
 
 def current_access_token(cfg: AppConfig) -> str | None:
-    # First check if we have a session in memory
+    # First check if we have a session in memory (current page)
     session = st.session_state.get(SESSION_KEY)
     if isinstance(session, dict):
         access_token = session.get("access_token")
         refresh_token = session.get("refresh_token")
         expires_at = session.get("expires_at")
         if isinstance(access_token, str) and isinstance(refresh_token, str):
+            # Check if token is still valid
             if isinstance(expires_at, (int, float)) and expires_at <= time.time() + 60:
+                # Token expiring soon, try to refresh
                 try:
                     refreshed = _auth_request(
                         cfg,
@@ -195,9 +127,10 @@ def current_access_token(cfg: AppConfig) -> str | None:
                         "Your session expired or could not be refreshed. Sign in again."
                     )
                     return None
+            # Token still valid
             return access_token
     
-    # Try to restore from query parameters (for persistent "remember me" sessions)
+    # Try to restore from query parameters (from URL, e.g., bookmarked or from history)
     auth_token = st.query_params.get("auth")
     refresh_token = st.query_params.get("refresh")
     expires_at_str = st.query_params.get("expires")
@@ -230,7 +163,7 @@ def current_access_token(cfg: AppConfig) -> str | None:
                         "Your session expired or could not be refreshed. Sign in again."
                     )
                     return None
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError):
             # Invalid query params, clear them
             st.query_params.clear()
             return None
@@ -243,18 +176,9 @@ def render_sign_in(cfg: AppConfig) -> str | None:
         st.error("Set SUPABASE_URL and SUPABASE_ANON_KEY before using the OpenAI proxy.")
         return None
     
-    # Try to restore session from localStorage on initial page load
-    _restore_session_from_storage()
-    
     access_token = current_access_token(cfg)
     if access_token:
         return access_token
-    
-    # Debug: Show what query params we have
-    if st.query_params:
-        auth_param = st.query_params.get("auth")
-        if auth_param:
-            st.caption(f"ℹ️ Debug: Found auth token in URL but couldn't restore session. Try signing in manually.")
     
     auth_error = st.session_state.pop("supabase_auth_error", None)
     if auth_error:
@@ -264,7 +188,7 @@ def render_sign_in(cfg: AppConfig) -> str | None:
     with st.form("supabase_sign_in"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
-        remember_me = st.checkbox(f"Remember me for {REMEMBER_ME_DAYS} days")
+        remember_me = st.checkbox(f"Remember me for {REMEMBER_ME_DAYS} days (bookmark this page)")
         submitted = st.form_submit_button("Sign in", type="primary")
     if submitted:
         try:
@@ -280,18 +204,6 @@ def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop(REMEMBER_ME_KEY, None)
     st.query_params.clear()
-    
-    # Clear localStorage
-    st.components.v1.html(
-        """
-        <script>
-        localStorage.removeItem("supabase_auth");
-        localStorage.removeItem("supabase_refresh");
-        localStorage.removeItem("supabase_expires");
-        </script>
-        """,
-        height=0,
-    )
 
 
 def ensure_cli_sign_in(cfg: AppConfig) -> None:
