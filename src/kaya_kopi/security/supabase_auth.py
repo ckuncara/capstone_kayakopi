@@ -178,11 +178,11 @@ def current_access_token(cfg: AppConfig) -> str | None:
     # Try to restore from query parameters (for persistent "remember me" sessions)
     auth_token = st.query_params.get("auth")
     refresh_token = st.query_params.get("refresh")
-    expires_at = st.query_params.get("expires")
+    expires_at_str = st.query_params.get("expires")
     
-    if auth_token and refresh_token and expires_at:
+    if auth_token and refresh_token and expires_at_str:
         try:
-            expires_at_float = float(expires_at)
+            expires_at_float = float(expires_at_str)
             # Check if token is still valid
             if expires_at_float > time.time() + 60:
                 # Token is still valid, restore to session state
@@ -227,6 +227,12 @@ def render_sign_in(cfg: AppConfig) -> str | None:
     access_token = current_access_token(cfg)
     if access_token:
         return access_token
+    
+    # Debug: Show what query params we have
+    if st.query_params:
+        auth_param = st.query_params.get("auth")
+        if auth_param:
+            st.caption(f"ℹ️ Debug: Found auth token in URL but couldn't restore session. Try signing in manually.")
     
     auth_error = st.session_state.pop("supabase_auth_error", None)
     if auth_error:
