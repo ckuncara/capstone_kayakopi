@@ -42,12 +42,12 @@ def _restore_session_from_storage() -> None:
             const expires = localStorage.getItem("supabase_expires");
             
             if (auth && refresh && expires) {
-                // Redirect to include query params
+                // Update query params and reload page
                 const url = new URL(window.location);
                 url.searchParams.set("auth", auth);
                 url.searchParams.set("refresh", refresh);
                 url.searchParams.set("expires", expires);
-                window.location = url.toString();
+                window.location.replace(url.toString());
             }
         }
         restoreSession();
@@ -185,6 +185,7 @@ def current_access_token(cfg: AppConfig) -> str | None:
             expires_at_float = float(expires_at)
             # Check if token is still valid
             if expires_at_float > time.time() + 60:
+                # Token is still valid, restore to session state
                 st.session_state[SESSION_KEY] = {
                     "access_token": auth_token,
                     "refresh_token": refresh_token,
@@ -207,7 +208,7 @@ def current_access_token(cfg: AppConfig) -> str | None:
                         "Your session expired or could not be refreshed. Sign in again."
                     )
                     return None
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
             # Invalid query params, clear them
             st.query_params.clear()
             return None
@@ -226,6 +227,7 @@ def render_sign_in(cfg: AppConfig) -> str | None:
     access_token = current_access_token(cfg)
     if access_token:
         return access_token
+    
     auth_error = st.session_state.pop("supabase_auth_error", None)
     if auth_error:
         st.warning(auth_error)
