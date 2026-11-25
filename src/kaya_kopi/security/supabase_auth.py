@@ -20,6 +20,43 @@ SESSION_TIMEOUT_MINS = 10
 REMEMBER_ME_DAYS = 14
 
 
+def _restore_session_from_storage() -> None:
+    """On page load, check localStorage for persisted query params and redirect if needed."""
+    # Only run once on initial page load
+    if "session_restore_attempted" in st.session_state:
+        return
+    
+    st.session_state["session_restore_attempted"] = True
+    
+    # Check if we already have query params
+    if st.query_params.get("auth"):
+        return
+    
+    # Try to restore from localStorage
+    st.components.v1.html(
+        """
+        <script>
+        function restoreSession() {
+            const auth = localStorage.getItem("supabase_auth");
+            const refresh = localStorage.getItem("supabase_refresh");
+            const expires = localStorage.getItem("supabase_expires");
+            
+            if (auth && refresh && expires) {
+                // Redirect to include query params
+                const url = new URL(window.location);
+                url.searchParams.set("auth", auth);
+                url.searchParams.set("refresh", refresh);
+                url.searchParams.set("expires", expires);
+                window.location = url.toString();
+            }
+        }
+        restoreSession();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _auth_request(cfg: AppConfig, endpoint: str, payload: dict[str, str]) -> dict[str, Any]:
     try:
         response = httpx.post(
@@ -82,11 +119,23 @@ def _save_session(session: dict[str, Any], remember_me: bool = False) -> str:
     st.session_state[SESSION_KEY] = session_data
     st.session_state[REMEMBER_ME_KEY] = remember_me
     
-    # Persist to query params if remember_me is checked
+    # Persist to query params AND localStorage if remember_me is checked
     if remember_me:
         st.query_params["auth"] = access_token
         st.query_params["refresh"] = refresh_token
         st.query_params["expires"] = str(session_data["expires_at"])
+        
+        # Also save to localStorage so we can restore on browser restart
+        st.components.v1.html(
+            f"""
+            <script>
+            localStorage.setItem("supabase_auth", "{access_token}");
+            localStorage.setItem("supabase_refresh", "{refresh_token}");
+            localStorage.setItem("supabase_expires", "{session_data['expires_at']}");
+            </script>
+            """,
+            height=0,
+        )
     
     return access_token
 
@@ -170,6 +219,10 @@ def render_sign_in(cfg: AppConfig) -> str | None:
     if not cfg.supabase_url or not cfg.supabase_anon_key:
         st.error("Set SUPABASE_URL and SUPABASE_ANON_KEY before using the OpenAI proxy.")
         return None
+    
+    # Try to restore session from localStorage on initial page load
+    _restore_session_from_storage()
+    
     access_token = current_access_token(cfg)
     if access_token:
         return access_token
@@ -197,6 +250,18 @@ def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop(REMEMBER_ME_KEY, None)
     st.query_params.clear()
+    
+    # Clear localStorage
+    st.components.v1.html(
+        """
+        <script>
+        localStorage.removeItem("supabase_auth");
+        localStorage.removeItem("supabase_refresh");
+        localStorage.removeItem("supabase_expires");
+        </script>
+        """,
+        height=0,
+    )
 
 
 def ensure_cli_sign_in(cfg: AppConfig) -> None:
