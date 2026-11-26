@@ -10,10 +10,12 @@ from unittest.mock import MagicMock, Mock, patch
 from PIL import Image
 from openpyxl import Workbook
 
+from kaya_kopi.copilot.tools import kaya
 from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, Settings, UploadStore, citation_path, collect_sources, select_sql
 from kaya_kopi.upload_assistant.invoice_audit import audit_invoice
 from kaya_kopi.upload_assistant.agent import (
-    UploadAgent, dedupe_manager_refusals, history_outlet, parse_period,
+    SYSTEM, UploadAgent, dedupe_manager_refusals, delivery_issue_question,
+    delivery_search_query, history_outlet, parse_period,
     price_delta, pricing_question, pricing_scenario_answer, safe_result,
     uploaded_item_question,
     uploaded_purchase_answer, with_source_warning,
@@ -534,6 +536,94 @@ def model_message(content="", calls=None):
 
 def tool_call(name, sql, identifier):
     return SimpleNamespace(id=identifier, type="function", function=SimpleNamespace(name=name, arguments=json.dumps({"sql": sql})))
+
+
+def test_delivery_question_detection_and_search_query():
+    assert delivery_issue_question("any eggs delivery delayed in any outlet?")
+    assert delivery_issue_question("eggs never arrive, called Ban Seng, driver MC")
+    assert not delivery_issue_question("how much teh did we purchase in 2025?")
+    assert "driver MC" in delivery_search_query("any eggs delivery delayed in any outlet?")
+
+
+def test_search_merges_indexed_whatsapp_documents(processor, monkeypatch):
+    collection = Mock()
+    collection.count.return_value = 0
+    processor.collection = Mock(return_value=collection)
+    search_sql = Mock()
+    search_sql.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_type": "whatsapp_message",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+            "source_locator": "lines=47-47",
+            "citation": "data/docs/whatsapp_exports/ops_chat_export.txt#lines=47-47",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search_sql)
+
+    result = processor.search("eggs never delivered driver MC")
+
+    assert result["ok"] is True
+    assert result["results"][0]["source_type"] == "whatsapp_message"
+    assert result["results"][0]["citation"].endswith("lines=47-47")
+
+
+def test_search_keeps_document_evidence_when_embeddings_fail(processor, monkeypatch):
+    processor.collection = Mock(side_effect=RuntimeError("embedding service unavailable"))
+    search_sql = Mock()
+    search_sql.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_type": "whatsapp_message",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search_sql)
+
+    result = processor.search("eggs never delivered driver MC")
+
+    assert result["results"][0]["source_type"] == "whatsapp_message"
+    assert "Uploaded-document embeddings could not be searched." in result["errors"]
+
+
+def test_system_prompt_uses_parallel_independent_tools_then_dependent_followups():
+    assert "Call independent tools in the same turn" in SYSTEM
+    assert "search_documents" in SYSTEM
+    assert "reporter's outlet tag" in SYSTEM
+
+
+def test_delivery_answer_prefetches_chat_evidence_before_invoice_tools(processor, tmp_path):
+    source = "data/docs/whatsapp_exports/ops_chat_export.txt"
+    source_file = tmp_path / source
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("eggs today never deliver leh, called Ban Seng they say driver MC")
+    processor.search = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "source_type": "whatsapp_message",
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_file": source,
+            "source_uri": source,
+        }],
+    })
+    processor.store.query = Mock(return_value={"ok": True, "rows": []})
+    processor.client.chat.completions.create.side_effect = [
+        model_message(calls=[tool_call("query_uploads", "SELECT * FROM uploaded_invoices", "invoices")]),
+        model_message("Yes, chat reports show egg delivery problems; the affected outlet was not stated."),
+    ]
+    agent = UploadAgent(processor)
+    agent.existing_schema = Mock(return_value={})
+
+    result = agent.ask([{"role": "user", "content": "any eggs delivery delayed in any outlet?"}])
+
+    assert processor.search.call_count == 1
+    assert result["tools"][0] == {"name": "search_documents", "ok": True, "truncated": False}
+    assert source in result["sources"]
+    assert "delivery problems" in result["content"]
+    system_message = processor.client.chat.completions.create.call_args_list[0].kwargs["messages"][0]["content"]
+    assert "Operational chat/email evidence retrieved" in system_message
 
 
 def test_chat_fetches_provenance_after_aggregate_and_returns_structured_sources(processor):

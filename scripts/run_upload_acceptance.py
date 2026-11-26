@@ -21,6 +21,10 @@ from scripts.llm_acceptance_common import (
 
 CASES = [
     (
+        "any eggs delivery delayed in any outlet?",
+        "Must use search_documents for WhatsApp reports as well as any invoice tool, report multiple egg non-delivery reports with dates and reporter tags, state that Ban Seng cited a driver MC, cite the chat file, and not infer the affected outlet from the reporter tag. Invoices alone are not proof of no delay.",
+    ),
+    (
         "who our supplier?",
         "Must query the client supplier master with query_existing, report the five verified canonical supplier names and codes, and not invent names.",
     ),

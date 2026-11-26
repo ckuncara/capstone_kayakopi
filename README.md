@@ -46,10 +46,10 @@ The deterministic test command does not call the LLM. To manually review the non
 answers after loading the database, run the Ops Copilot or Upload Desk acceptance scenario set:
 
 ```bash
-# Ops Copilot: 29 scenarios
+# Ops Copilot: 31 scenarios
 docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
 
-# Upload Desk: 31 scenarios, including tool traces and source files
+# Upload Desk: 32 scenarios, including tool traces and source files
 docker compose --profile test run --rm test python -m scripts.run_upload_acceptance
 ```
 

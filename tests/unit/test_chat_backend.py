@@ -4,11 +4,12 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from decimal import Decimal
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai.chat_models.base import OpenAIInvalidRequestError
 from streamlit.testing.v1 import AppTest
@@ -41,6 +42,141 @@ def test_safe_ai_message_normalises_block_content():
     safe = chat_backend._safe_ai_message(message, [])
 
     assert safe.content == "Our suppliers are A and B."
+
+
+def test_delivery_issue_question_detects_operational_reports():
+    assert chat_backend.delivery_issue_question("any eggs delivery delayed in any outlet?")
+    assert chat_backend.delivery_issue_question("eggs never arrive, driver MC")
+    assert not chat_backend.delivery_issue_question("how much teh did we purchase in 2025?")
+
+
+def test_delivery_system_message_requires_document_search():
+    message = chat_backend._current_system_message(
+        "any eggs delivery delayed in any outlet?"
+    )
+
+    assert "search_documents_sql" in message.content
+    assert "invoices alone" in message.content
+
+
+def test_delivery_question_prefetches_chat_evidence(tmp_path, monkeypatch):
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = AIMessage(content="Yes, chat reports show egg delivery problems.")
+    search = Mock()
+    search.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "source_type": "whatsapp_message",
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+            "source_locator": "lines=47-47",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        result = chat_backend.get_chatbot().invoke(
+            {"messages": [HumanMessage(content="any eggs delivery delayed in any outlet?")]},
+            {"configurable": {"thread_id": "delivery-test"}},
+        )
+    finally:
+        chat_backend.get_chatbot.cache_clear()
+
+    assert search.invoke.call_count == 1
+    sent = model.invoke.call_args.args[0]
+    assert any(
+        "Operational chat/email evidence retrieved" in str(message.content)
+        for message in sent
+    )
+    assert "chat reports show egg delivery problems" in result["messages"][-1].content
+    assert any(
+        isinstance(message, SystemMessage)
+        and "Operational chat/email evidence retrieved" in str(message.content)
+        for message in result["messages"]
+    )
+
+
+def test_tool_call_turn_does_not_print_a_placeholder_answer():
+    tool_turn = AIMessage(
+        content=[{"type": "text", "text": ""}],
+        tool_calls=[{"name": "get_data_coverage_sql", "args": {}, "id": "1"}],
+    )
+    final_turn = AIMessage(content=[{"type": "text", "text": ""}])
+
+    assert chat_backend._safe_ai_message(tool_turn, []).content == ""
+    assert chat_backend._safe_ai_message(final_turn, []).content == "No answer was returned."
+
+
+def test_price_scenario_detection_and_amount():
+    question = (
+        "Show a S$0.10 kopi price scenario and the public recipe assumptions. "
+        "What can and cannot be concluded?"
+    )
+
+    assert chat_backend.price_scenario_question(question)
+    assert chat_backend.price_scenario_amount(question) == Decimal("0.10")
+    assert not chat_backend.price_scenario_question(
+        "How much can we increase the Teh price to improve margin?"
+    )
+
+
+def test_price_scenario_prefetches_numbers_and_missing_recipe_note(tmp_path, monkeypatch):
+    question = (
+        "Show a S$0.10 kopi price scenario and the public recipe assumptions. "
+        "What can and cannot be concluded?"
+    )
+    scenario = Mock()
+    scenario.invoke = Mock(return_value={
+        "ok": True,
+        "status": "PARTIAL",
+        "observed_partial_pos": {
+            "units": "1100", "gross_sales_sgd": "2034.40",
+            "minimum_observed_price_sgd": "1.60", "maximum_observed_price_sgd": "2.16",
+        },
+        "gross_price_increase_sgd": "0.10",
+        "scenarios": [{
+            "demand_change_percent": "0", "projected_units": "1100.00",
+            "projected_gross_sales_sgd": "2144.40",
+            "incremental_gross_sales_sgd": "110.00",
+            "incremental_ex_gst_sales_sgd": "100.92",
+        }],
+        "missing_for_decision": ["recipe-level ingredient cost per cup"],
+        "citation": [{"source_uri": "data/sql/kayakopi_pos.sql"}],
+    })
+    recipe = Mock()
+    recipe.invoke = Mock(return_value={"ok": True, "results": []})
+    monkeypatch.setattr(kaya, "assess_kopi_price_change_sql", scenario)
+    monkeypatch.setattr(kaya, "search_documents_sql", recipe)
+
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = AIMessage(content="At unchanged volume, +SGD 110.00 gross sales.")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        result = chat_backend.get_chatbot().invoke(
+            {"messages": [HumanMessage(content=question)]},
+            {"configurable": {"thread_id": "scenario-test"}},
+        )
+    finally:
+        chat_backend.get_chatbot.cache_clear()
+
+    assert scenario.invoke.call_count == 1
+    assert recipe.invoke.call_count == 1
+    sent = model.invoke.call_args.args[0]
+    context = " ".join(str(message.content) for message in sent)
+    assert "2144.40" in context
+    assert "110.00" in context
+    assert "No indexed recipe card" in context
+    assert result["messages"][-1].content == "At unchanged volume, +SGD 110.00 gross sales."
 
 
 def test_custom_chat_model_is_sent_to_provider(monkeypatch, tmp_path):

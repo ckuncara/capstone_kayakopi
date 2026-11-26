@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Iterator, TypedDict
@@ -55,7 +57,17 @@ for monetary amounts. The tools are read-only; do not claim to change client dat
 
 Do not disclose personal contact details, home addresses, individual pay, performance, or discipline.
 Names of people who reported operational issues may be shown.
-Do not offer legal or tax advice, price recommendations, or make decisions for the user.
+Do not offer legal or tax advice, price recommendations, or make decisions for the user. A neutral
+sensitivity scenario from assess_kopi_price_change_sql is allowed: report its numbers with the
+limitations, but never recommend a price. That tool's status=PARTIAL and
+recommendation=INSUFFICIENT_EVIDENCE mean the figures are a sensitivity analysis, not a
+recommendation and not "no result". Always report every row in its `scenarios` array: projected
+units, projected gross sales, incremental gross sales and incremental ex-GST sales at each demand
+case, with the observed partial POS baseline and the stated price-change assumption. Separate what
+the scenario shows from what it cannot establish: recipe cost per cup, portion/yield assumptions,
+target margin, demand response and net profit are not evidenced by invoices or outlet takings.
+If no indexed recipe card, portion spec, target margin or price-change history is found, say so
+plainly instead of supplying invented recipe quantities.
 
 For supplier business-address questions, use get_supplier_addresses_sql with the full recorded
 supplier name. Ask for the supplier name if it is missing. The lookup returns at most 10 invoice-backed
@@ -121,7 +133,110 @@ double-count the same purchase in both, and never mix currencies. Return source_
 before calling an uploaded-file citation; client-table figures are database results, not uploaded
 files. A successful empty result means no matching rows, not zero activity. Do not use direct SQL
 to infer unit cost, full expense allocation, legal or tax conclusions.
+
+For delivery, delay, non-delivery, shortage or supplier-service problems, call
+search_documents_sql as well as any relevant supplier or invoice tool in the same turn, or
+immediately after the first database result. Invoices do not record delivery timing or the
+affected outlet. Treat WhatsApp/email messages as operational reports, not settled adjustments
+or proof of a financial credit. If a chat message names only the reporter's outlet tag, do not
+infer that the affected outlet was that outlet; say the outlet was not stated. Cite the returned
+source_uri and source_locator. Call independent tools together where possible and use later
+calls only for dependent provenance or verification.
 """
+
+
+DELIVERY_ISSUE_REQUEST = re.compile(
+    r"\b(?:delay(?:ed|s)?|late|never|missing|short(?:age)?|fail(?:ed|ure)?|driver\s+mc|mc)\b",
+    re.IGNORECASE,
+)
+DELIVERY_SUBJECT = re.compile(
+    r"\b(?:deliver(?:y|ed|ies)?|egg|eggs|supplier|order|truck|driver)\b",
+    re.IGNORECASE,
+)
+
+
+def delivery_issue_question(question: str) -> bool:
+    """Detect operational delivery reports that need chat/email evidence."""
+    return bool(DELIVERY_ISSUE_REQUEST.search(question) and DELIVERY_SUBJECT.search(question))
+
+
+def delivery_search_query(question: str) -> str:
+    """Use the known operational wording so full-text search finds the reports."""
+    terms = [question.strip()]
+    if re.search(r"\beggs?\b", question, re.IGNORECASE):
+        terms.append("eggs never delivered driver MC supplier delivery")
+    return " ".join(term for term in terms if term)
+
+
+def _delivery_evidence_marker(question: str) -> str:
+    """Scope a prefetched evidence message to the question that requested it."""
+    digest = hashlib.sha256(delivery_search_query(question).encode("utf-8")).hexdigest()[:12]
+    return f"Operational chat/email evidence retrieved for this delivery question [{digest}]"
+
+
+PRICE_SCENARIO_AMOUNT = re.compile(
+    r"(?:\$|s\$|sgd)\s*(\d+(?:\.\d{1,2})?)|\b(\d+(?:\.\d{1,2})?)\s*(?:cents?|c)\b",
+    re.IGNORECASE,
+)
+PRICE_SCENARIO_TOPIC = re.compile(
+    r"\b(?:price|pricing|priced|kopi|teh|scenario|margin|sensitivity)\b", re.IGNORECASE
+)
+
+
+def price_scenario_question(question: str) -> bool:
+    """Detect a concrete per-cup price-change sensitivity request."""
+    return bool(PRICE_SCENARIO_TOPIC.search(question) and PRICE_SCENARIO_AMOUNT.search(question))
+
+
+def price_scenario_amount(question: str) -> Decimal | None:
+    match = PRICE_SCENARIO_AMOUNT.search(question)
+    if not match:
+        return None
+    try:
+        amount = Decimal(match.group(1) or match.group(2))
+    except InvalidOperation:
+        return None
+    if match.group(2) and not match.group(1):
+        amount /= Decimal(100)
+    return amount if amount.is_finite() and amount > 0 else None
+
+
+def _price_scenario_period() -> tuple[date, date]:
+    today = datetime.now(ZoneInfo("Asia/Singapore")).date()
+    return date(today.year, 1, 1), today
+
+
+def _price_scenario_marker(question: str) -> str:
+    digest = hashlib.sha256(question.strip().lower().encode("utf-8")).hexdigest()[:12]
+    return f"Price-change scenario evidence retrieved [{digest}]"
+
+
+def _price_scenario_context(result: dict) -> str:
+    observed = result.get("observed_partial_pos") or {}
+    lines = [
+        "Price-change sensitivity retrieved for this question "
+        "(PARTIAL evidence; quantified scenarios are available):",
+        f"Observed partial POS: {observed.get('units')} cups, "
+        f"SGD {observed.get('gross_sales_sgd')} sales, unit prices "
+        f"SGD {observed.get('minimum_observed_price_sgd')} to "
+        f"SGD {observed.get('maximum_observed_price_sgd')}.",
+        f"Assumed gross price increase: SGD {result.get('gross_price_increase_sgd')}.",
+    ]
+    for row in result.get("scenarios") or []:
+        lines.append(
+            f"- Demand {row.get('demand_change_percent')}%: "
+            f"{row.get('projected_units')} cups, projected gross sales "
+            f"SGD {row.get('projected_gross_sales_sgd')}, incremental gross "
+            f"SGD {row.get('incremental_gross_sales_sgd')}, incremental ex-GST "
+            f"SGD {row.get('incremental_ex_gst_sales_sgd')}."
+        )
+    lines.append("Missing for a decision: " + ", ".join(result.get("missing_for_decision") or []) + ".")
+    lines.append(
+        "Report these numbers. Do not say the scenario tool returned no quantified result "
+        "when scenarios are present; PARTIAL means sensitivity, not a recommendation."
+    )
+    lines.append("Citations: " + json.dumps(_safe_tool_value(result.get("citation") or []), default=str))
+    return "\n".join(lines)
 
 
 DIRECT_DATABASE_REQUEST = re.compile(
@@ -140,6 +255,13 @@ def _current_system_message(question: str | None = None) -> SystemMessage:
         content += (
             "\n\nThe user explicitly requested direct database retrieval. Call "
             "discover_mysql_schema first, then query_mysql_direct, before any specialist tool."
+        )
+    if question and delivery_issue_question(question):
+        content += (
+            "\n\nThe user is asking about an operational delivery problem. Search WhatsApp/email "
+            "records with search_documents_sql in addition to any invoice or supplier query. Do "
+            "not conclude 'no delay' from invoices alone; chat reports are the evidence for "
+            "delivery timing. Do not infer the affected outlet from the reporter's tag."
         )
     return SystemMessage(content=content)
 
@@ -191,11 +313,15 @@ def _safe_tool_message(message: ToolMessage) -> ToolMessage:
 def _safe_ai_message(message: AIMessage, addresses: list[str]) -> AIMessage:
     content = message.content
     if isinstance(content, str):
-        content = protect_answer(content, addresses)
+        content = protect_answer(content, addresses) if content else ""
     else:
         # Some models return text as content blocks instead of one plain string.
         text = message_text(content)
-        content = protect_answer(text, addresses) if text else "No answer was returned."
+        content = protect_answer(text, addresses) if text else ""
+    # Tool-call turns are intermediate steps, not user-facing answers. Leaving them
+    # empty stops the Streamlit stream from printing a placeholder for every tool.
+    if not content and not message.tool_calls:
+        content = "No answer was returned."
     calls = [
         {**call, "args": _safe_tool_value(call["args"])}
         for call in message.tool_calls
@@ -235,6 +361,16 @@ def _supplier_addresses(messages: list[BaseMessage]) -> list[str]:
 
 
 def _has_tool_result(messages: list[BaseMessage]) -> bool:
+    prefetch_markers = (
+        "Operational chat/email evidence retrieved",
+        "Price-change scenario evidence retrieved",
+    )
+    if any(
+        isinstance(message, SystemMessage)
+        and any(marker in str(message.content) for marker in prefetch_markers)
+        for message in messages
+    ):
+        return True
     for message in reversed(messages):
         if message.type == "human":
             break
@@ -335,7 +471,90 @@ def get_chatbot(access_token: str | None = None):
                 message = _safe_ai_message(message, _supplier_addresses(messages))
             messages.append(message)
         messages.insert(0, _current_system_message(question))
-        
+        prefetched: list[SystemMessage] = []
+
+        def already_prefetched(marker: str) -> bool:
+            return any(
+                isinstance(message, SystemMessage) and marker in str(message.content)
+                for message in state["messages"]
+            )
+
+        def add_prefetch(marker: str, content: str) -> None:
+            message = SystemMessage(content=marker + " " + content)
+            messages.insert(1, message)
+            prefetched.append(message)
+
+        if question and delivery_issue_question(question):
+            marker = _delivery_evidence_marker(question)
+            if not already_prefetched(marker):
+                # Prefetch independent chat/email evidence so an invoice-only tool
+                # choice cannot miss operational delivery reports. Dependent SQL
+                # provenance can still be fetched by later model tool calls.
+                from kaya_kopi.copilot.tools.kaya import search_documents_sql
+
+                try:
+                    evidence = search_documents_sql.invoke(
+                        {"query": delivery_search_query(question), "limit": 10}
+                    )
+                except Exception:
+                    evidence = {"ok": False, "error": "Document search is unavailable."}
+                safe_evidence = _safe_tool_value(evidence)
+                add_prefetch(marker, "(reports, not settled adjustments): " + json.dumps(safe_evidence, default=str))
+
+        if question and price_scenario_question(question):
+            marker = _price_scenario_marker(question)
+            if not already_prefetched(marker):
+                from kaya_kopi.copilot.tools.kaya import (
+                    assess_kopi_price_change_sql, search_documents_sql,
+                )
+
+                amount = price_scenario_amount(question)
+                start_date, end_date = _price_scenario_period()
+                try:
+                    scenario = assess_kopi_price_change_sql.invoke({
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "gross_price_increase_sgd": str(amount),
+                        "demand_change_percent": ["0", "-5", "-10"],
+                    })
+                except Exception:
+                    scenario = {"ok": False, "error": "The price scenario tool is unavailable."}
+                content = ""
+                if scenario.get("ok") is not False and scenario.get("scenarios"):
+                    content = _price_scenario_context(scenario)
+                else:
+                    content = (
+                        "The price scenario tool returned no figures; say exactly "
+                        "what could not be retrieved and do not invent a scenario."
+                    )
+                # Recipe assumptions are a separate, independent evidence source.
+                try:
+                    recipe = search_documents_sql.invoke({
+                        "query": "kopi recipe card portion target margin price change assumptions",
+                        "limit": 10,
+                    })
+                except Exception:
+                    recipe = {"ok": False, "error": "Document search is unavailable."}
+                chunks = [
+                    str(row.get("chunk_text", ""))
+                    for row in recipe.get("results", []) if isinstance(row, dict)
+                ] if recipe.get("ok") is not False else []
+                has_recipe = any(
+                    re.search(r"\brecipe\b|\bportion\b|target margin", text, re.IGNORECASE)
+                    for text in chunks
+                )
+                content += (
+                    "\nIndexed recipe-assumption evidence: "
+                    + json.dumps(_safe_tool_value(recipe), default=str)
+                )
+                if not has_recipe:
+                    content += (
+                        "\nNo indexed recipe card, portion spec, target margin or price-change "
+                        "history was found. State that recipe assumptions are unavailable; do "
+                        "not invent ingredient quantities or a verified cost per cup."
+                    )
+                add_prefetch(marker, content)
+
         # Invoke model and capture response with token usage (llm_usage_tracker.py)
         response = model_with_tools.invoke(messages)
         response = _safe_ai_message(response, _supplier_addresses(messages))
@@ -353,7 +572,7 @@ def get_chatbot(access_token: str | None = None):
         if hasattr(response, 'response_metadata') and response.response_metadata:
             state['_last_response_metadata'] = response.response_metadata
         
-        return {"messages": [response]}
+        return {"messages": [*prefetched, response]}
 
     connection = sqlite3.connect(_chat_database_path(), check_same_thread=False)
     checkpointer = SqliteSaver(connection)

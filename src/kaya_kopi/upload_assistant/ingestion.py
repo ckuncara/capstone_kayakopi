@@ -576,11 +576,51 @@ class UploadProcessor:
         return len(chunks), source
 
     def search(self, query: str) -> dict:
-        collection = self.collection()
-        count = collection.count()
-        if not count:
-            return {"ok": True, "results": []}
-        result = collection.query(query_embeddings=self.embeddings([protect_text(query)]), n_results=min(count, 5))
-        return {"ok": True, "results": [
-            {"text": document, **(metadata or {})} for document, metadata in zip(result["documents"][0], result["metadatas"][0], strict=True)
-        ]}
+        """Search both the upload embeddings and the indexed Kaya document corpus.
+
+        Upload embeddings contain uploaded invoice text. WhatsApp/email exports live
+        in the MySQL document index, so delivery and supplier-service questions need
+        that corpus too. Both sources are read-only.
+        """
+        results: list[dict] = []
+        errors: list[str] = []
+        try:
+            from kaya_kopi.copilot.tools.kaya import search_documents_sql
+
+            indexed = search_documents_sql.invoke({"query": query, "limit": 5})
+            if indexed.get("ok") is not False:
+                for row in indexed.get("results", []):
+                    if not isinstance(row, dict):
+                        continue
+                    results.append({
+                        "text": row.get("chunk_text", ""),
+                        "source_type": row.get("source_type"),
+                        "source_uri": row.get("source_uri"),
+                        "source_locator": row.get("source_locator"),
+                        "citation": row.get("citation"),
+                        "occurred_at": row.get("occurred_at"),
+                        "author": row.get("author"),
+                        "title": row.get("title"),
+                    })
+        except Exception:
+            errors.append("The indexed document corpus could not be searched.")
+
+        try:
+            collection = self.collection()
+            count = collection.count()
+            if count:
+                result = collection.query(
+                    query_embeddings=self.embeddings([protect_text(query)]),
+                    n_results=min(count, 5),
+                )
+                results.extend(
+                    {"text": document, **(metadata or {})}
+                    for document, metadata in zip(result["documents"][0], result["metadatas"][0], strict=True)
+                )
+        except Exception:
+            errors.append("Uploaded-document embeddings could not be searched.")
+
+        payload: dict = {"ok": True, "results": results}
+        if errors:
+            payload["errors"] = errors
+        return payload

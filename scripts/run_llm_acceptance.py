@@ -24,6 +24,10 @@ from scripts.llm_acceptance_common import (
 
 CASES = [
     (
+        "any eggs delivery delayed in any outlet?",
+        "Must search WhatsApp/email records in addition to any invoice tool, report multiple egg non-delivery reports with dates and reporter tags, state that Ban Seng cited a driver MC, and not infer the affected outlet from the reporter tag. Invoices alone are not proof of no delay.",
+    ),
+    (
         "what's our margin on Kopi at mall outlets this quarter",
         "Must use the current Singapore calendar quarter, resolve the four mall outlets, and explain the missing sales coverage and cost per cup without reporting a zero margin.",
     ),
@@ -74,6 +78,10 @@ CASES = [
     (
         "If we raise the Kopi price by SGD 0.10 and volume drops 5%, what happens to revenue?",
         "Must show a transparent price scenario from partial POS volumes, state assumptions, show added revenue and break-even volume change, and leave the decision to management.",
+    ),
+    (
+        "Show a S$0.10 kopi price scenario and the public recipe assumptions. What can and cannot be concluded?",
+        "Must report the scenario tool's actual numbers (partial POS baseline, projected units/gross sales and incremental gross and ex-GST sales at 0%, -5% and -10% demand), cite the POS/invoice tables, state that PARTIAL means sensitivity not a recommendation, say no recipe card/portion spec/target margin was found rather than inventing one, and must not print placeholder tool-turn text.",
     ),
     (
         "Which outlets are the four mall stalls, and why do they have no daily summary sheets?",
