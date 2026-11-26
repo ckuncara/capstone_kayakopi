@@ -8,12 +8,18 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 
 from kaya_kopi.copilot.chat_backend import get_chatbot
+from kaya_kopi.config import AppConfig
+from kaya_kopi.security.supabase_auth import ensure_cli_sign_in
 
 
 CASES = [
     (
         "what's our margin on Kopi at mall outlets this quarter",
         "Must use the current Singapore calendar quarter, resolve the four mall outlets, and explain the missing sales coverage and cost per cup without reporting a zero margin.",
+    ),
+    (
+        "Based on the available sales data, should we increase the price of Kopi by S$0.10?",
+        "Must show deterministic revenue sensitivity and any revenue-only break-even threshold from observed volume, disclose partial POS coverage, and not claim profit impact without recipe cost per cup.",
     ),
     (
         "Which supplier raised prices the most this year?",
@@ -37,7 +43,7 @@ CASES = [
     ),
     (
         "How much did we spend with each supplier by month, and which invoices were excluded or require review?",
-        "Must provide supplier-month figures and identify excluded invoice INV-012601-458 as REVIEW_REQUIRED.",
+        "Must provide supplier-month figures and identify excluded invoice INV-022602-661 as REVIEW_REQUIRED. INV-012601-458 is retained using validated invoice lines.",
     ),
     (
         "Why does purchase record INV-012508-182 not match the scanned invoice? Is GST responsible for the difference?",
@@ -45,12 +51,15 @@ CASES = [
     ),
     (
         "Which supplier increased its prices the most over the past year? Show evidence from the scanned invoice lines.",
-        "Must identify Mewah/SUP-04 condensed milk as the largest comparable percentage increase (15.23%) with first/latest invoice evidence.",
+        "Must identify Mewah/SUP-04 Condensed milk ctn as the largest comparable increase (8.03%) with first/latest invoice evidence, and disclose the observed invoice coverage period.",
     ),
 ]
 
 
 def main() -> None:
+    cfg = AppConfig()
+    if cfg.llm_proxy_url:
+        ensure_cli_sign_in(cfg)
     chatbot = get_chatbot()
     for number, (question, expected) in enumerate(CASES, start=1):
         result = chatbot.invoke(

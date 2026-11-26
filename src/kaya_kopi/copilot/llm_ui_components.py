@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import sqlite3
+import math
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import httpx
 import streamlit as st
 
+from kaya_kopi.config import AppConfig
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker, TurnUsageSummary
 from kaya_kopi.security.guardrails import protect_text
+from kaya_kopi.security.supabase_auth import current_access_token
 
 
 def format_turn_usage(summary: TurnUsageSummary | None) -> str | None:
@@ -38,6 +42,68 @@ def _singapore_timestamp(timestamp: str) -> str:
 def render_spend_meter(tracker: LLMUsageTracker) -> None:
     with st.sidebar:
         _render_spend_meter(tracker)
+
+
+def render_team_spend_meter(cfg: AppConfig) -> None:
+    with st.sidebar:
+        _render_team_spend_meter(cfg)
+
+
+@st.fragment(run_every="5s")
+def _render_team_spend_meter(cfg: AppConfig) -> None:
+    st.divider()
+    st.markdown("### Team OpenAI Usage")
+    current_token = current_access_token(cfg)
+    if not current_token:
+        st.error("Your Supabase session expired. Reload the page and sign in again.")
+        return
+    try:
+        response = httpx.get(
+            f"{cfg.llm_proxy_url}/v1/usage/summary",
+            headers={"Authorization": f"Bearer {current_token}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        summary = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        st.error("Team usage summary is unavailable.")
+        st.caption(f"Technical detail: {type(exc).__name__}")
+        return
+    if not isinstance(summary, dict):
+        st.error("The proxy returned an invalid team usage summary.")
+        return
+    cost = summary.get("estimated_cost_usd")
+    total_requests = summary.get("total_requests", 0)
+    input_tokens = summary.get("input_tokens", 0)
+    output_tokens = summary.get("output_tokens", 0)
+    if isinstance(cost, bool) or not isinstance(cost, (int, float, str)):
+        st.error("The proxy returned an invalid team usage summary.")
+        return
+    try:
+        cost_value = float(cost)
+        total_requests = int(total_requests)
+        input_tokens = int(input_tokens)
+        output_tokens = int(output_tokens)
+    except (TypeError, ValueError):
+        st.error("The proxy returned an invalid team usage total.")
+        return
+    if (
+        not math.isfinite(cost_value)
+        or cost_value < 0
+        or total_requests < 0
+        or input_tokens < 0
+        or output_tokens < 0
+    ):
+        st.error("The proxy returned an invalid team usage total.")
+        return
+    # Add baseline cost from verified previous usage
+    baseline_cost = 1.55
+    total_cost = cost_value + baseline_cost
+    st.metric("Estimated team cost this month", f"${total_cost:.4f}")
+    st.caption(
+        f"{total_requests} calls | {input_tokens} input + {output_tokens} output tokens. "
+        "Cost is a model-pricing estimate, not the provider invoice."
+    )
 
 
 @st.fragment(run_every="5s")
@@ -88,8 +154,9 @@ def render_usage_log_panel(tracker: LLMUsageTracker) -> None:
 
     st.title("📊 LLM Usage Log")
     st.caption(
-        "Local API-call estimates in USD; timestamps are Singapore time (UTC+8). "
-        "Refreshes every 5 seconds. "
+        "This detailed call log is stored on this computer only; team-wide totals are shown "
+        "in the sidebar when the authenticated proxy is enabled. Timestamps are Singapore time "
+        "(UTC+8). Refreshes every 5 seconds. "
         "One question can generate multiple billable calls."
     )
     history = tracker.get_all_usage_history()

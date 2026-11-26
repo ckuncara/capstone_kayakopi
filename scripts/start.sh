@@ -34,6 +34,7 @@ if [[ "$loaded" -ne 1 ]]; then
   exit 2
 fi
 
+./scripts/provision_copilot_readonly.sh
 docker compose up -d --build copilot
 
 echo "Kaya Kopi copilot is starting at http://localhost:${KAYA_STREAMLIT_HOST_PORT:-8501}"

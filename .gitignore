@@ -28,3 +28,6 @@ spend_trace.jsonl
 evals_report.json
 .vscode
 
+# graphify output directory
+graphify-out/
+

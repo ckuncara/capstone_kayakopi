@@ -1,0 +1,40 @@
+services:
+  upload-desk:
+    build:
+      context: .
+      dockerfile: docker/copilot.Dockerfile
+    user: "${KAYA_DOCKER_UID:-1000}:${KAYA_DOCKER_GID:-1000}"
+    env_file:
+      - .env
+    environment:
+      HOME: /tmp
+      KAYA_PROJECT_ROOT: /workspace
+      KAYA_DB_HOST: mysql
+      KAYA_DB_PORT: "3306"
+      KAYA_DB_USER: ${KAYA_DB_USER}
+      KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
+      LOCAL_SQLITE_PATH: /workspace/data/kaya_ops.db
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      CHROMA_COLLECTION: kaya_kopi_knowledge
+      UPLOAD_AI_EXISTING_DATA: ${UPLOAD_AI_EXISTING_DATA:-true}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
+    ports:
+      - "127.0.0.1:${UPLOAD_AI_PORT:-8502}:8502"
+    volumes:
+      - ./data:/workspace/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - streamlit
+      - run
+      - src/kaya_kopi/upload_assistant/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8502
+      - --browser.gatherUsageStats=false
+    restart: unless-stopped

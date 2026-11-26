@@ -3,6 +3,7 @@ from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
 from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.parsers.vector_chunking import TextChunk, build_chunks, estimate_tokens
 from kaya_kopi.security.budget_guard import BudgetGuard
+from kaya_kopi.security.openai_proxy import openai_client_options
 from kaya_kopi.security.pdpa_scrubber import scrub_pdpa
 
 
@@ -23,9 +24,12 @@ class SharedChromaRepository:
             cfg.chroma_dir.mkdir(parents=True, exist_ok=True)
             self.client = chromadb.PersistentClient(path=str(cfg.chroma_dir))
 
+        client_options = openai_client_options(cfg, "embedding")
         self.embed_fn = OpenAIEmbeddingFunction(
-            api_key=cfg.api_key,
+            api_key=client_options["api_key"],
             model_name=cfg.embed_model or "text-embedding-3-small",
+            api_base=client_options.get("base_url"),
+            default_headers=client_options.get("default_headers"),
         )
 
     def get_collection(self):

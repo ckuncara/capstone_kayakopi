@@ -1,7 +1,6 @@
 import streamlit as st
 import pymysql
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 from kaya_kopi.config import AppConfig
 from kaya_kopi.ingestion.parsers.invoice_vision_audit import (
     extract_invoice_with_openai,
@@ -13,15 +12,29 @@ from kaya_kopi.repositories.mysql_invoice_sync import (
     completed_syncs, pending_syncs, queue_resync, sync_invoice,
 )
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard
+from kaya_kopi.security.openai_proxy import (
+    create_chat_model,
+    openai_configured,
+    set_proxy_access_token,
+)
 from kaya_kopi.security.pdpa_scrubber import scrub_pdpa
+from kaya_kopi.security.supabase_auth import render_sign_in
 
 def render_invoice_audit_panel() -> None:
     default_cfg = AppConfig()
+    access_token = render_sign_in(default_cfg) if default_cfg.llm_proxy_url else None
+    if default_cfg.llm_proxy_url and access_token is None:
+        return
+    set_proxy_access_token(access_token)
 
     with st.sidebar:
         st.divider()
         st.subheader("OpenAI Config")
-        api_key = st.text_input("OpenAI API Key", type="password", value=default_cfg.api_key)
+        if default_cfg.llm_proxy_url:
+            st.caption("OpenAI calls use your authenticated team proxy.")
+            api_key = default_cfg.api_key
+        else:
+            api_key = st.text_input("OpenAI API Key", type="password", value=default_cfg.api_key)
         with st.expander("OpenAI Models & Budget", expanded=False):
             ocr_model = st.text_input("OCR Model", value=default_cfg.ocr_model)
             chat_model = st.text_input("Chat Model", value=default_cfg.chat_model)
@@ -90,8 +103,8 @@ def render_invoice_audit_panel() -> None:
             accept_multiple_files=True,
         )
         if files and st.button("Extract, Validate & Save", type="primary"):
-            if not cfg.api_key:
-                st.error("OpenAI API key is required.")
+            if not openai_configured(cfg):
+                st.error("OpenAI access is not configured.")
             else:
                 vec_repo = SharedChromaRepository(cfg, budget_guard=budget)
                 for f in files:
@@ -209,7 +222,7 @@ def render_invoice_audit_panel() -> None:
 
     with tab_rag:
         q = st.text_input("Ask a question (auto-scrubbed for SG PDPA):")
-        if q and cfg.api_key:
+        if q and openai_configured(cfg):
             scrubbed_q = scrub_pdpa(q)
             try:
                 budget.check_budget_or_raise()
@@ -219,7 +232,9 @@ def render_invoice_audit_panel() -> None:
                     st.info("No matching documents found.")
                 else:
                     ctx = "\n\n---\n\n".join(doc for _, doc in hits)
-                    chat = ChatOpenAI(model=cfg.chat_model, temperature=0.1, api_key=cfg.api_key)
+                    chat = create_chat_model(
+                        cfg, cfg.chat_model, purpose="chat", temperature=0.1
+                    )
                     resp = chat.invoke(
                         [
                             SystemMessage(

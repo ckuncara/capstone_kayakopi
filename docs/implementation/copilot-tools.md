@@ -1,7 +1,44 @@
 # Kaya Kopi chatbot tools
 
-The seven LangChain tools in `app.tools` expose fixed, read-only MySQL queries. They do not accept SQL
-from the model and do not write to the database.
+The LangChain tools in `kaya_kopi.copilot.tools` expose specialist business queries, schema
+discovery, model-written read-only SQL, and Chroma retrieval. OpenAI selects tools and writes
+queries from chat requests; users do not need to supply SQL.
+
+## General database access
+
+Configure explicit, comma-separated table names in `.env`:
+
+```dotenv
+KAYA_LLM_MYSQL_TABLES=source_document,supplier_invoice,supplier_invoice_item
+KAYA_LLM_SQLITE_TABLES=supplier_invoices,supplier_invoice_items
+KAYA_LLM_CHROMA_COLLECTIONS=kaya_kopi_knowledge
+LOCAL_SQLITE_PATH=data/kaya_ops.db
+```
+
+`discover_database_schema` exposes only enabled tables and columns. `query_database` accepts
+one read-only SELECT/CTE query, rejects unapproved or qualified tables, and limits results to
+200 rows. SQLite uses a read-only connection and an authorizer, with an instruction budget;
+MySQL uses a read-only transaction and a five-second SELECT timeout. General MySQL queries
+reject views. Custom/server-side functions and write statements are denied.
+
+Unset or empty SQL lists disable general SQL access. When a list is present, existing MySQL
+specialists also enforce it, and the old SQLite question-pattern tool directs the model to
+the restricted query tool. Specialists may need more tables than the invoice-only example.
+An empty Chroma list disables retrieval; when unset, only the configured default collection
+is enabled. `search_knowledge_chroma` searches enabled collections, not only invoice chunks.
+Restart the application after changing `.env`. Use a dedicated SELECT-only MySQL account
+with per-table grants; application allowlists are not a replacement for database permissions.
+
+Queries should join enabled provenance tables and return `source_uri` or `image_path`.
+The tools validate those paths against actual files in `data`, and the main chat appends
+verified file links when omitted by the model, even for records ingested into MySQL.
+Aggregate queries need a follow-up provenance lookup over contributing records. Missing or
+inaccessible source files are disclosed, never guessed. Links identify source files; serving
+or downloading them in a remote browser is a separate application concern.
+
+Existing privacy checks remain pattern-based. Only allow data appropriate for every user
+of the chat, preferably pre-redacted tables; arbitrary SQL aliases can weaken field-name
+redaction. Chroma collection access is independent of SQL table access.
 
 ```python
 from kaya_kopi.copilot.tools import ALL_TOOLS

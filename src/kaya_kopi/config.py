@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from kaya_kopi.paths import project_root
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(project_root() / ".env")
 
 
 def _sqlite_db_path() -> Path:
@@ -17,6 +18,9 @@ def _sqlite_db_path() -> Path:
 @dataclass(frozen=True)
 class AppConfig:
     api_key: str = os.getenv("OPENAI_API_KEY", "")
+    llm_proxy_url: str = os.getenv("LLM_PROXY_URL", "").rstrip("/")
+    supabase_url: str = os.getenv("SUPABASE_URL", "").rstrip("/")
+    supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
     # Configurable OpenAI models with defaults if not found
     ocr_model: str = os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini")
     chat_model: str = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
