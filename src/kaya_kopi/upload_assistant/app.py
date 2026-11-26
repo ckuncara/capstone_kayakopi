@@ -12,9 +12,8 @@ from openpyxl import load_workbook
 
 from kaya_kopi.config import AppConfig
 from kaya_kopi.paths import project_root
-from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py, llm_ui_components.py)
 from kaya_kopi.copilot.llm_ui_components import (
-    _singapore_timestamp, format_turn_usage, render_spend_meter, render_team_spend_meter, render_usage_log_panel,
+    format_turn_usage, render_spend_meter, render_team_spend_meter, render_usage_log_panel,
 )
 from kaya_kopi.security.guardrails import protect_answer, protect_text
 from kaya_kopi.upload_assistant.agent import UploadAgent
@@ -168,6 +167,23 @@ def render_sources(sources: list[str], key: str) -> None:
                     workbook.close()
 
 
+def render_invoice_audit(audit: dict) -> None:
+    st.caption("Invoice arithmetic audit")
+    status = audit.get("status")
+    notes = [protect_text(str(note)) for note in audit.get("issues", [])]
+    if status == "REVIEW":
+        st.warning("Printed invoice amounts do not agree; see the differences below.")
+        for note in notes:
+            st.write(f"- {note}")
+    elif status == "PASS":
+        st.success("Printed lines, subtotal, GST and total agree within 0.02.")
+    else:
+        st.info("Some arithmetic could not be verified from the printed invoice.")
+        for note in [protect_text(str(note)) for note in audit.get("notes", [])]:
+            st.caption(note)
+    st.caption(f"{len(audit.get('line_checks', []))} item line(s) stored for analysis.")
+
+
 def process_upload(name: str, content: bytes, kind: str, key: str) -> None:
     status = st.status(f"Processing {name}...", expanded=True)
     with status:
@@ -186,6 +202,8 @@ def process_upload(name: str, content: bytes, kind: str, key: str) -> None:
         else:
             st.success(f"{name}: {result['record_count']} records")
         render_sources([result["source_file"]], key)
+        if result.get("audit"):
+            render_invoice_audit(result["audit"])
     except (ValueError, UnicodeError) as error:
         status.update(label=f"Processing stopped: {name}", state="error", expanded=True)
         st.error(f"{name}: {error}")
@@ -195,43 +213,14 @@ def process_upload(name: str, content: bytes, kind: str, key: str) -> None:
         st.error(f"{name}: processing failed ({type(error).__name__}); retry after checking service availability.")
 
 
-@st.fragment(run_every="5s")
-def render_usage_log() -> None:
-    st.subheader("LLM Usage Log")
-    st.caption("Local USD estimates, not provider billing. One answer may involve several API calls.")
-    tracker = processor.budget.usage_tracker
-    history = tracker.get_all_usage_history()
-    if not history:
-        st.info("No API usage recorded yet.")
-        return
-    calls, tokens, cost = st.columns(3)
-    calls.metric("Logged calls", len(history))
-    tokens.metric("Known tokens", f"{sum(row['total_tokens'] or 0 for row in history):,}")
-    cost.metric("Known estimated USD", f"${sum(row['total_cost'] or 0 for row in history):.6f}")
-    if tracker.get_unpriced_count():
-        st.warning("Some calls have missing usage or unsupported pricing. Totals exclude unknown amounts.")
-    st.dataframe([{
-        "Timestamp (Singapore)": _singapore_timestamp(row["timestamp"]),
-        "Conversation": row["thread_id"], "Turn": row.get("turn_id"),
-        "Prompt / operation": protect_text(row["prompt"] or ""),
-        "Model": row["model_name"], "Input tokens": row["input_tokens"],
-        "Cached input tokens": row["cached_input_tokens"], "Output tokens": row["output_tokens"],
-        "Reasoning tokens": row["reasoning_tokens"], "Total tokens": row["total_tokens"],
-        "Estimated USD": f"${row['total_cost']:.6f}" if row["total_cost"] is not None else "Unpriced",
-        "Cost status": row["cost_status"], "Response ID": row["response_id"],
-    } for row in history], hide_index=True, use_container_width=True)
-
-# Initialize tracker for spend meter (llm_usage_tracker.py)
-if (
-    "usage_tracker" not in st.session_state
-    or st.session_state.usage_tracker.db_path != AppConfig().sqlite_db_path
-):
-    st.session_state.usage_tracker = LLMUsageTracker()
-
 st.title("☕ Kaya Kopi Ops Copilot")
 st.caption("Grounded answers from POS, invoices, operational documents, and data-quality records")
 try:
     store, processor, agent = services()
+    # One shared tracker for the spend meter, audit log and per-answer captions.
+    # processor.budget now points at AppConfig().sqlite_db_path, the same
+    # database the unmodified Ops Copilot reads.
+    st.session_state.usage_tracker = processor.budget.usage_tracker
 except Exception as error:
     logging.exception("Upload Desk startup failed")
     st.error(f"Upload Desk could not start ({type(error).__name__}). Check OpenAI configuration and permissions for upload tables in the existing Kaya MySQL database.")
@@ -317,6 +306,8 @@ with chat_tab:
             st.markdown(message["content"])
             if message.get("usage_caption"):
                 st.caption(message["usage_caption"])
+            if message.get("source_note"):
+                st.caption(message["source_note"])
             render_sources(message.get("sources", []), f"history_{index}")
             if message.get("tools"):
                 with st.expander("Query activity"):
@@ -337,14 +328,13 @@ with chat_tab:
                 result = {"content": f"The lookup could not complete ({type(error).__name__}). Check service availability and API configuration.", "sources": [], "tools": []}
             result["content"] = protect_answer(result["content"])
             result["turn_id"] = turn_id
-            summary = processor.budget.usage_tracker.get_turn_usage(st.session_state.upload_desk_thread_id, turn_id)
-            caption = format_turn_usage(summary)
-            if caption:
-                result["usage_caption"] = caption
-            else:
-                result["usage_caption"] = "No API usage record is available for this answer."
+            if not result.get("usage_caption"):
+                summary = processor.budget.usage_tracker.get_turn_usage(st.session_state.upload_desk_thread_id, turn_id)
+                result["usage_caption"] = format_turn_usage(summary) or "No API usage record is available for this answer."
             st.markdown(result["content"])
             st.caption(result["usage_caption"])
+            if result.get("source_note"):
+                st.caption(result["source_note"])
             render_sources(result["sources"], f"live_{len(st.session_state.upload_desk_messages)}")
             if result["tools"]:
                 with st.expander("Query activity"):
@@ -379,7 +369,9 @@ with upload_tab:
                 process_upload(selected_path.name, selected_path.read_bytes(), kind, f"existing_{kind}_{index}")
 
 with usage_tab:
-    render_usage_log()
+    # Same audit panel as the Ops Copilot (usage source, pricing version,
+    # legacy warnings and provider-billing reconciliation).
+    render_usage_log_panel(st.session_state.usage_tracker)
 
 with files_tab:
     records = store.files()

@@ -23,6 +23,7 @@ from sqlglot.optimizer.scope import traverse_scope
 from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.mysql import DatabaseConfig, MySQLRepository, _json_safe
 from kaya_kopi.security.guardrails import protect_answer, protect_text
+from kaya_kopi.upload_assistant.invoice_audit import audit_invoice, db_flag
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,17 @@ UPLOAD_SCHEMA = {
     "uploaded_invoices": {
         "purpose": "One OCR supplier invoice per file; purchases, not proof of payment or all company expenses.",
         "columns": "file_hash, invoice_number, invoice_date, vendor_name, outlet_name, currency, subtotal, gst_amount, total_amount, review_notes, line_items_json, source_file",
-        "rules": "Filter invoice_date for the period. Do not mix currencies. Include source_file in results; retrieve contributing source_file values separately for aggregates. Check review_notes; totals are OCR observations, not audited amounts.",
+        "rules": "Filter invoice_date for the period. Do not mix currencies. Include source_file in results; retrieve contributing source_file values separately for aggregates. Check review_notes and uploaded_invoice_audits; totals are OCR observations, not audited amounts.",
+    },
+    "uploaded_invoice_lines": {
+        "purpose": "One OCR-extracted item line per uploaded supplier invoice, stored as individual rows for item-level analysis.",
+        "columns": "id, file_hash, line_no, description, quantity, unit_price, line_amount, expected_line_amount, line_amount_diff, check_status, source_file",
+        "rules": "Join to uploaded_invoices on file_hash. check_status is MATCH, MISMATCH or UNVERIFIED, comparing printed line_amount with quantity x unit_price within 0.02. NULL means missing, never zero. Include source_file and do not mix currencies.",
+    },
+    "uploaded_invoice_audits": {
+        "purpose": "Arithmetic audit of each uploaded invoice against its printed lines, subtotal, GST and total. Not a tax or payment audit.",
+        "columns": "file_hash, subtotal_match, gst_match, total_match, expected_subtotal, expected_gst, expected_total, subtotal_diff, gst_diff, total_diff, audit_status, audit_notes, source_file",
+        "rules": "audit_status is PASS, REVIEW or UNVERIFIED. A NULL match flag means the check could not be computed; it is not a pass. Read audit_notes for the exact printed-versus-calculated differences. Join to uploaded_invoices on file_hash and include source_file.",
     },
     "uploaded_outlet_csvs": {
         "purpose": "One normalized daily outlet CSV row; NULL means missing, never zero.",
@@ -90,6 +101,18 @@ CSV_SOURCE_COLUMNS = {
     "reported_volume": "INT NULL", "volume_measure": "VARCHAR(30) NULL",
     "wastage_kg": "DECIMAL(12,3) NULL", "source_row_number": "INT NULL",
 }
+
+
+def _load_line_items(raw: Any) -> list[dict]:
+    """Read the legacy line_items_json column without trusting its contents."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
 
 
 def select_sql(sql: str, tables: set[str], dialect: str) -> str:
@@ -167,6 +190,21 @@ class UploadStore:
                 vendor_name VARCHAR(255), outlet_name VARCHAR(120), currency VARCHAR(10),
                 subtotal DECIMAL(14,2), gst_amount DECIMAL(14,2), total_amount DECIMAL(14,2),
                 review_notes TEXT, line_items_json JSON, source_file VARCHAR(700) NOT NULL)""",
+            """CREATE TABLE IF NOT EXISTS uploaded_invoice_lines (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY, file_hash CHAR(64) NOT NULL,
+                line_no INT NOT NULL, description VARCHAR(500) NOT NULL,
+                quantity DECIMAL(14,4) NULL, unit_price DECIMAL(14,4) NULL,
+                line_amount DECIMAL(14,2) NULL, expected_line_amount DECIMAL(14,2) NULL,
+                line_amount_diff DECIMAL(14,2) NULL, check_status VARCHAR(20) NOT NULL,
+                source_file VARCHAR(700) NOT NULL, INDEX (file_hash))""",
+            """CREATE TABLE IF NOT EXISTS uploaded_invoice_audits (
+                file_hash CHAR(64) PRIMARY KEY, subtotal_match TINYINT(1) NULL,
+                gst_match TINYINT(1) NULL, total_match TINYINT(1) NULL,
+                expected_subtotal DECIMAL(14,2) NULL, expected_gst DECIMAL(14,2) NULL,
+                expected_total DECIMAL(14,2) NULL, subtotal_diff DECIMAL(14,2) NULL,
+                gst_diff DECIMAL(14,2) NULL, total_diff DECIMAL(14,2) NULL,
+                audit_status VARCHAR(20) NOT NULL, audit_notes TEXT NOT NULL,
+                source_file VARCHAR(700) NOT NULL)""",
             """CREATE TABLE IF NOT EXISTS uploaded_outlet_csvs (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY, file_hash CHAR(64) NOT NULL,
                 outlet_name VARCHAR(120), report_date DATE, cups_sold INT, revenue_sgd DECIMAL(14,2),
@@ -198,6 +236,49 @@ class UploadStore:
                             except pymysql.OperationalError as error:
                                 if not error.args or error.args[0] != 1060:
                                     raise
+                self._backfill_invoice_details(cursor)
+
+    def _backfill_invoice_details(self, cursor: Any) -> None:
+        """Populate normalized lines/audits for invoices uploaded before this schema."""
+        cursor.execute("""SELECT i.file_hash, i.source_file, i.subtotal, i.gst_amount,
+                                 i.total_amount, i.line_items_json
+                          FROM uploaded_invoices i
+                          LEFT JOIN uploaded_invoice_audits a ON a.file_hash = i.file_hash
+                          WHERE a.file_hash IS NULL""")
+        rows = cast(list[dict[str, Any]], cursor.fetchall())
+        for row in rows:
+            if not row.get("file_hash"):
+                continue
+            lines = _load_line_items(row.get("line_items_json"))
+            audit = audit_invoice({
+                "subtotal": row.get("subtotal"),
+                "gst_amount": row.get("gst_amount"),
+                "total_amount": row.get("total_amount"),
+                "gst_rate_percent": None,
+                "is_gst_inclusive": None,
+                "line_items": lines,
+            })
+            cursor.execute("DELETE FROM uploaded_invoice_lines WHERE file_hash=%s", (row["file_hash"],))
+            if lines:
+                cursor.executemany("""INSERT INTO uploaded_invoice_lines
+                    (file_hash,line_no,description,quantity,unit_price,line_amount,
+                     expected_line_amount,line_amount_diff,check_status,source_file)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", [
+                    (row["file_hash"], line["line_no"], line["description"], line["quantity"],
+                     line["unit_price"], line["line_amount"], line["expected_line_amount"],
+                     line["line_amount_diff"], line["check_status"], row["source_file"])
+                    for line in audit["line_checks"]
+                ])
+            cursor.execute("""REPLACE INTO uploaded_invoice_audits
+                (file_hash,subtotal_match,gst_match,total_match,expected_subtotal,
+                 expected_gst,expected_total,subtotal_diff,gst_diff,total_diff,
+                 audit_status,audit_notes,source_file)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (
+                row["file_hash"], db_flag(audit["subtotal_match"]), db_flag(audit["gst_match"]),
+                db_flag(audit["total_match"]), audit["expected_subtotal"], audit["expected_gst"],
+                audit["expected_total"], audit["subtotal_diff"], audit["gst_diff"],
+                audit["total_diff"], audit["status"], audit["notes_text"], row["source_file"],
+            ))
 
     def existing(self, digest: str) -> dict | None:
         with self.manifest() as connection:

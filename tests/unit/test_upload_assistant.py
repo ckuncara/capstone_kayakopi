@@ -2,6 +2,7 @@ import pytest
 import pymysql
 import io
 import json
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -9,9 +10,15 @@ from unittest.mock import MagicMock, Mock, patch
 from PIL import Image
 from openpyxl import Workbook
 
-from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, Settings, UploadStore, citation_path, collect_sources, select_sql
-from kaya_kopi.upload_assistant.agent import UploadAgent, history_outlet, safe_result, with_source_warning
+from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, Settings, UploadStore, citation_path, collect_sources, select_sql
+from kaya_kopi.upload_assistant.invoice_audit import audit_invoice
+from kaya_kopi.upload_assistant.agent import (
+    UploadAgent, dedupe_manager_refusals, history_outlet, parse_period,
+    price_delta, pricing_question, safe_result, uploaded_item_question,
+    uploaded_purchase_answer, with_source_warning,
+)
 from kaya_kopi.upload_assistant.ingestion import InvoiceExtraction, RosterBatch, RosterRow, UploadProcessor, parse_outlet_csv, roster_sheets, roster_source_fields
+from kaya_kopi.config import AppConfig
 from kaya_kopi.security.budget_guard import BudgetGuard
 
 
@@ -93,7 +100,7 @@ def test_mysql_initialization_never_creates_a_database(tmp_path, monkeypatch):
     store.init_mysql()
     cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
     statements = [call.args[0] for call in cursor.execute.call_args_list]
-    assert len([statement for statement in statements if statement.startswith("CREATE TABLE IF NOT EXISTS uploaded_")]) == 3
+    assert len([statement for statement in statements if statement.startswith("CREATE TABLE IF NOT EXISTS uploaded_")]) == 5
     assert any("ADD COLUMN `mon_shift`" in statement for statement in statements)
     assert any("ADD COLUMN `hourly_rate_sgd`" in statement for statement in statements)
     assert all("CREATE DATABASE" not in statement for statement in statements)
@@ -125,11 +132,30 @@ def processor(tmp_path, monkeypatch):
     processor.structured = Mock()
     processor.client = Mock()
     processor.budget = Mock()
-    processor.budget.usage_tracker.get_all_usage_history.return_value = []
-    processor.budget.usage_tracker.get_unpriced_count.return_value = 0
-    processor.budget.usage_tracker.get_turn_usage.return_value = None
+    tracker = processor.budget.usage_tracker
+    tracker.get_all_usage_history.return_value = []
+    tracker.get_unpriced_count.return_value = 0
+    tracker.get_turn_usage.return_value = None
+    tracker.get_latest_reconciliation.return_value = None
+    tracker.get_latest_usage.return_value = None
+    tracker.get_current_model.return_value = "gpt-4o-mini"
+    tracker.get_budget_info.return_value = {
+        "total_spent": 0.0, "budget_left": 50.0, "percentage_used": 0.0,
+    }
+    tracker.get_color_for_spending.return_value = "green"
     processor.log = Mock()
     return processor
+
+
+def test_upload_processor_shares_copilot_usage_database(tmp_path, monkeypatch):
+    db = tmp_path / "shared_kaya_ops.db"
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(db))
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+
+    processor = UploadProcessor(store)
+
+    assert processor.budget.usage_tracker.db_path == AppConfig().sqlite_db_path == db
 
 
 @pytest.mark.parametrize("header,values,expected_date", [
@@ -180,6 +206,63 @@ def test_invoice_ocr_archives_original_and_saves_provenance(processor):
     processor.structured.reset_mock()
     assert processor.process("same.png", image.getvalue(), "invoices")["duplicate"]
     processor.structured.assert_not_called()
+
+
+def test_invoice_audit_detects_line_subtotal_and_total_mismatches():
+    audit = audit_invoice({
+        "subtotal": 30, "gst_amount": 2.7, "total_amount": 33.7,
+        "gst_rate_percent": 9, "is_gst_inclusive": False,
+        "line_items": [
+            {"description": "Coffee beans", "quantity": 2, "unit_price": 10, "amount": 21},
+            {"description": "Milk", "quantity": 3, "unit_price": 2, "amount": 6},
+        ],
+    })
+    assert audit["status"] == "REVIEW"
+    assert [line["check_status"] for line in audit["line_checks"]] == ["MISMATCH", "MATCH"]
+    assert audit["subtotal_match"] is False
+    assert audit["gst_match"] is True
+    assert audit["total_match"] is False
+    assert any("Line 1" in note for note in audit["issues"])
+    assert any("Subtotal" in note for note in audit["issues"])
+    assert any("Total" in note for note in audit["issues"])
+
+
+def test_invoice_audit_understands_gst_inclusive_totals():
+    audit = audit_invoice({
+        "subtotal": 100, "gst_amount": 9, "total_amount": 109,
+        "gst_rate_percent": 9, "is_gst_inclusive": True,
+        "line_items": [{"description": "Cafe supplies", "quantity": 1, "unit_price": 109, "amount": 109}],
+    })
+    assert audit["status"] == "PASS"
+    assert audit["expected_gst"] == 9.0
+    assert audit["gst_match"] is True
+
+
+def test_invoice_ocr_stores_individual_lines_and_audit(processor):
+    image = io.BytesIO()
+    Image.new("RGB", (40, 40), "white").save(image, format="PNG")
+    processor.structured.return_value = InvoiceExtraction(
+        vendor_name="Coffee supplier", invoice_number="INV-2", invoice_date="2025-08-02",
+        outlet_name=None, currency="SGD", subtotal=30, gst_amount=2.7, total_amount=33.7,
+        gst_rate_percent=9, is_gst_inclusive=False, review_notes="Blurred stamp",
+        line_items=[
+            {"description": "Coffee beans", "quantity": 2, "unit_price": 10, "amount": 21},
+            {"description": "Milk", "quantity": 3, "unit_price": 2, "amount": 6},
+        ],
+    )
+    result = processor.process("invoice-lines.png", image.getvalue(), "invoices")
+    assert result["audit"]["status"] == "REVIEW"
+    cursor = processor.store.repository.return_value._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    sql, rows = cursor.executemany.call_args.args
+    assert "INSERT INTO uploaded_invoice_lines" in sql
+    assert len(rows) == 2
+    assert rows[0][2] == "Coffee beans"
+    assert rows[0][8] == "MISMATCH"
+    audit_call = next(call for call in cursor.execute.call_args_list if "uploaded_invoice_audits" in call.args[0])
+    assert audit_call.args[1][10] == "REVIEW"
+    invoice_call = cursor.execute.call_args
+    assert "Arithmetic audit:" in invoice_call.args[1][9]
+    assert {"uploaded_invoice_lines", "uploaded_invoice_audits"} <= set(UPLOAD_SCHEMA)
 
 
 def test_csv_is_parsed_without_openai_and_missing_stays_null(processor):
@@ -392,6 +475,35 @@ def test_roster_column_migration_is_idempotent(tmp_path, monkeypatch):
     assert not any("ALTER TABLE" in call.args[0] for call in cursor.execute.call_args_list)
 
 
+def test_init_mysql_backfills_legacy_invoice_line_json(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+    repository = MagicMock()
+    store.repository = Mock(return_value=repository)
+    cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+    source = "data/images/supplier_invoices/old.png"
+    cursor.fetchall.side_effect = [
+        [{"Field": "id"}],
+        [{"Field": "id"}],
+        [{
+            "file_hash": "legacy-hash", "source_file": source, "subtotal": 40,
+            "gst_amount": 3.6, "total_amount": 43.6,
+            "line_items_json": json.dumps([
+                {"description": "Coffee beans", "quantity": 4, "unit_price": 10, "amount": 40}
+            ]),
+        }],
+    ]
+
+    store.init_mysql()
+
+    sql, rows = cursor.executemany.call_args.args
+    assert "INSERT INTO uploaded_invoice_lines" in sql
+    assert rows[0][0] == "legacy-hash"
+    assert rows[0][2] == "Coffee beans"
+    audit_call = next(call for call in cursor.execute.call_args_list if "REPLACE INTO uploaded_invoice_audits" in call.args[0])
+    assert audit_call.args[1][10] == "UNVERIFIED"
+
+
 def test_excel_roster_rejects_mismatched_row_locations(processor):
     processor.structured.return_value = RosterBatch(rows=[])
     with pytest.raises(ValueError, match="locations changed"):
@@ -459,6 +571,159 @@ def test_margin_questions_explain_missing_inputs_without_tool_loop(processor, qu
     assert "invented figure" in content
     assert result["sources"] == []
     assert processor.client.chat.completions.create.call_count == 0
+
+
+@pytest.mark.parametrize("question", [
+    "Should we increase Kopi price by 10 cent?",
+    "raise kopi price by $0.10",
+    "increase kopi price by 0.10",
+])
+def test_price_delta_and_pricing_question_detect_per_cup_changes(question):
+    assert price_delta(question) == Decimal("0.10")
+    assert pricing_question(question)
+
+
+def test_pricing_question_returns_per_unit_sensitivity(processor, monkeypatch):
+    agent = UploadAgent(processor)
+    tool = Mock()
+    menu_rows = [{"item_id": 1, "item_name": "Kopi", "base_price": "1.60"}]
+    aggregate_rows = [{"item_id": 1, "item_name": "Kopi", "units": "1000", "revenue": "2000.00"}]
+    coverage_rows = [{"first_tx": "2025-07-01T07:00:00", "last_tx": "2026-06-30T21:00:00"}]
+
+    def invoke(arguments):
+        sql = arguments["sql"]
+        if "LEFT JOIN pos_transactions" in sql:
+            return {"ok": True, "rows": aggregate_rows}
+        if "MIN(tx_time)" in sql:
+            return {"ok": True, "rows": coverage_rows}
+        if "FROM menu_items" in sql:
+            return {"ok": True, "rows": menu_rows}
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    tool.invoke.side_effect = invoke
+    monkeypatch.setattr("kaya_kopi.upload_assistant.agent.query_database", tool)
+    processor.store.query = Mock(return_value={
+        "ok": True, "rows": [{"kg": "70.0000", "spend": "4717.45"}],
+    })
+
+    result = agent.ask([{"role": "user", "content": "Should we increase Kopi price by 10 cent?"}])
+    content = result["content"]
+    assert "### Verified POS baseline" in content
+    assert "| Cups | Sales |" in content
+    assert "### Revenue scenario" in content
+    assert "SGD 100.00" in content
+    assert "SGD 2,100.00" in content
+    assert "48 cups" in content
+    assert "item-level cost of goods sold" in content
+    assert "does not establish profit" in content
+    assert "Finance and Admin Manager" in content
+    assert content.count("Finance and Admin Manager") == 1
+    assert "no OpenAI call" in result["usage_caption"]
+    assert "database analysis" in result["source_note"]
+    assert result["sources"] == []
+    assert processor.client.chat.completions.create.call_count == 0
+
+
+def test_uploaded_invoice_item_question_detects_purchase_intent():
+    question = "How many Tea dust purchased from supplier in 2026?"
+    assert uploaded_item_question(question)
+    assert parse_period(question) == ("2026", "2026-01-01", "2027-01-01")
+    assert not uploaded_item_question("How many cups were sold in 2026?")
+    assert not uploaded_item_question("Has the supplier been paid in 2026?")
+
+
+def test_uploaded_purchase_answer_uses_already_uploaded_invoice_lines(processor):
+    _, source = processor.store.archive("INV-2026.jpg", b"invoice", "invoices")
+    base = {
+        "description": "Tea dust 5kg", "vendor_name": "HENG HUAT COFFEE ROASTERS",
+        "currency": "SGD", "check_status": "MATCH", "source_file": source,
+    }
+    details = [
+        {**base, "file_hash": "h1", "invoice_date": "2026-01-21", "invoice_number": "INV-1",
+         "quantity": "10.0000", "line_amount": "509.60", "audit_status": "UNVERIFIED",
+         "audit_notes": "GST was not independently checked against a printed rate."},
+        {**base, "file_hash": "h2", "invoice_date": "2026-04-13", "invoice_number": "INV-2",
+         "quantity": "11.0000", "line_amount": "583.11", "audit_status": "UNVERIFIED",
+         "audit_notes": "GST was not independently checked against a printed rate."},
+        {**base, "file_hash": "h3", "invoice_date": "2026-05-01", "invoice_number": "INV-3",
+         "quantity": "9.0000", "line_amount": "489.96", "audit_status": "UNVERIFIED",
+         "audit_notes": "GST was not independently checked against a printed rate."},
+        {**base, "file_hash": "h4", "invoice_date": "2026-05-11", "invoice_number": "INV-4",
+         "quantity": "3.0000", "line_amount": "162.24", "audit_status": "UNVERIFIED",
+         "audit_notes": "GST was not independently checked against a printed rate."},
+        {**base, "file_hash": "h5", "invoice_date": "2026-06-12", "invoice_number": "INV-5",
+         "quantity": "3.0000", "line_amount": "163.83", "audit_status": "REVIEW",
+         "audit_notes": "Total: printed 1138.79 vs subtotal + GST 1142.15 (diff -3.36)."},
+    ]
+    details.append(dict(details[0]))
+
+    def query(sql):
+        if "SELECT DISTINCT description" in sql:
+            return {"ok": True, "rows": [
+                {"description": "Tea dust 5kg"}, {"description": "Kopi powder 5kg"},
+            ]}
+        if "FROM uploaded_invoice_lines l" in sql:
+            assert "i.invoice_date >= '2026-01-01'" in sql
+            assert "i.invoice_date < '2027-01-01'" in sql
+            assert "'tea dust 5kg'" in sql and "'kopi powder 5kg'" not in sql
+            return {"ok": True, "rows": details}
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    processor.store.query = Mock(side_effect=query)
+    result = uploaded_purchase_answer(
+        "How many Tea dust purchased from supplier in 2026?", processor.store,
+    )
+    assert result is not None
+    content = result["content"]
+    assert "36.0000" in content
+    assert "SGD 1,908.74" in content
+    assert "5 uploaded invoice(s)" in content
+    assert "1 supplier(s)" in content
+    assert "Tea dust 5kg" in content
+    assert "no separate unit column" in content
+    assert "4 UNVERIFIED" in content and "1 REVIEW" in content
+    assert "identical invoice line(s) were deduplicated" in content
+    assert result["sources"] == [source]
+    assert "supplier invoices already uploaded" in result["source_note"]
+    assert "no OpenAI call" in result["usage_caption"]
+
+
+def test_chat_answers_uploaded_purchase_question_without_tool_loop(processor):
+    _, source = processor.store.archive("INV-2026.jpg", b"invoice", "invoices")
+    rows = [{
+        "file_hash": "h1", "description": "Tea dust 5kg", "quantity": "36.0000",
+        "line_amount": "1908.74", "check_status": "MATCH", "invoice_date": "2026-06-12",
+        "invoice_number": "INV-1", "vendor_name": "Supplier A", "currency": "SGD",
+        "audit_status": "UNVERIFIED", "audit_notes": "GST not checked.",
+        "source_file": source,
+    }]
+    processor.store.query = Mock(side_effect=lambda sql: (
+        {"ok": True, "rows": [{"description": "Tea dust 5kg"}]}
+        if "SELECT DISTINCT description" in sql
+        else {"ok": True, "rows": rows}
+    ))
+    result = UploadAgent(processor).ask([{
+        "role": "user",
+        "content": "How many Tea dust purchased from supplier in 2026?",
+    }])
+    assert "36.0000" in result["content"]
+    assert result["sources"] == [source]
+    assert "no OpenAI call" in result["usage_caption"]
+    assert processor.client.chat.completions.create.call_count == 0
+
+
+def test_dedupe_manager_refusals_keeps_one_notice():
+    text = (
+        "Verified figures.\n"
+        "Please consult with the Finance and Admin Manager for a comprehensive decision.\n"
+        "I can show the figures and evidence, but can't recommend or make a business decision. "
+        "Please contact the Finance and Admin Manager.\n"
+        "I can show the figures and evidence, but can't recommend or make a business decision. "
+        "Please contact the Finance and Admin Manager."
+    )
+    result = dedupe_manager_refusals(text)
+    assert result.count("Finance and Admin Manager") == 1
+    assert "Verified figures." in result
 
 
 def test_step_limit_falls_back_to_answer_from_existing_evidence(processor):
