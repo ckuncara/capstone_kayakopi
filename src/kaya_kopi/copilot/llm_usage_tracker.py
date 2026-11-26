@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import sqlite3
+from contextlib import closing
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -98,7 +99,7 @@ class LLMUsageTracker:
 
     def _init_db(self) -> None:
         """Initialize the SQLite database schema."""
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS llm_usage (
@@ -238,7 +239,7 @@ class LLMUsageTracker:
                            model_name, service_tier, usage_source)
         
         # Store in database
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("""
                 INSERT INTO llm_usage (
                     thread_id, prompt, model_name, input_tokens, output_tokens,

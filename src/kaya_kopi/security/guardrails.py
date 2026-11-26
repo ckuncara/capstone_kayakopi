@@ -11,6 +11,9 @@ FINANCE_REFUSAL = (
     "I can't provide an individual's pay, performance or disciplinary details, or legal "
     "or tax advice. Please contact the Finance and Admin Manager."
 )
+CONTACT_REFUSAL = (
+    "I can't provide personal contact details such as, phone numbers, email addresses, home addresses or identity numbers."
+)
 ACTION_REFUSAL = (
     "I can't export batches of messages or personal data, or perform external actions. "
     "I can answer read-only questions about the available data."
@@ -23,7 +26,7 @@ WITHHELD = "This information was withheld because it may contain confidential de
 
 PAY = re.compile(
     r"\b(?:pay(?:roll|s|ing)?|salary|salaries|wages?|earn(?:s|ed|ings)?|"
-    r"hourly\s+rates?|rates?\s+per\s+hour)\b",
+    r"hourly\s+rates?|rates?\s+per\s+hour)\b|\bgets?\s+(?:\$\s*|SGD\s*)\d",
     re.I,
 )
 PERFORMANCE = re.compile(
@@ -53,7 +56,7 @@ AGGREGATE = re.compile(
 )
 OUTLET_CODE = re.compile(r"\b[A-Z]{2,5}-\d{2}[A-Z]?\b(?:['’]s)?", re.I)
 GROUP_PAY = re.compile(r"\b(?:payroll|staff\s+(?:pay|wages?|salaries))\b", re.I)
-HOURLY = re.compile(r"\b(?:hourly\s+rates?|rates?\s+per\s+hour|per\s+hour)\b|/hr\b", re.I)
+HOURLY = re.compile(r"\b(?:hourly\s+rates?|rates?\s+per\s+hour|per\s+hour|an\s+hour)\b|/hr\b", re.I)
 PERSONAL_PAY = re.compile(
     r"(?i:\b(?:earns?|earned|is\s+paid|was\s+paid)\b|"
     r"\bper\s+(?:employee|staff|worker|person)\b)|"
@@ -67,6 +70,18 @@ ADVICE = re.compile(
 )
 TAX_LAW = re.compile(r"\b(?:legal|law|lawful|tax|gst|taxation)\b", re.I)
 LEGAL_QUESTION = re.compile(r"\b(?:is\s+it\s+legal|legally|tax\s+advice|legal\s+advice)\b", re.I)
+TAX_TREATMENT = re.compile(r"\b(?:tax|gst)\s+(?:treatment|obligation|liability|deduction)\b", re.I)
+TAX_INSTRUCTION = re.compile(r"\b(?:must|required\s+to|eligible\s+to|entitled\s+to)\b", re.I)
+PRIVATE_CONTACT = re.compile(
+    r"\b(?:phone|mobile|telephone|nric|fin\s+number|home\s+address|"
+    r"residential\s+address|personal\s+email)\b",
+    re.I,
+)
+PERSONAL_EMAIL = re.compile(
+    r"(?i:(?:['’]s|employee|staff|personal)\s+email(?:\s+address)?\b)|"
+    r"(?i:\bemail\s+address\s+(?:of|for)\s+(?:an?\s+)?)"
+    r"(?:(?i:employee|staff)|[A-Z][a-z]+)\b"
+)
 PRICING = re.compile(r"\b(?:price|cost|expense|supplier|margin|spend)\w*\b", re.I)
 BULK = re.compile(
     r"\b(?:export|download|dump|bulk)\b.*\b(?:message|chat|document|email|"
@@ -77,7 +92,9 @@ BULK = re.compile(
 )
 ACTION = re.compile(
     r"\b(?:place|submit|send|create|update|change|modify|delete|cancel)\b"
-    r".{0,45}\b(?:orders?|messages?|emails?|records?|database|purchases?)\b",
+    r".{0,45}\b(?:orders?|messages?|emails?|records?|database|purchases?)\b|"
+    r"^\s*(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?"
+    r"(?:order|email|message)\s+(?!by\b)",
     re.I,
 )
 STREET_ADDRESS = re.compile(
@@ -130,13 +147,15 @@ def refuse_request(question: str) -> str | None:
     """Return a refusal for recognised prohibited requests."""
     if BULK.search(question) or ACTION.search(question):
         return ACTION_REFUSAL
+    if PRIVATE_CONTACT.search(question) or PERSONAL_EMAIL.search(question):
+        return CONTACT_REFUSAL
     if _has_private_pay(question):
         return FINANCE_REFUSAL
     if DISCIPLINE.search(question) or (
         PERFORMANCE.search(question) and (PERSON.search(question) or PERSON_PERFORMANCE.search(question))
     ):
         return FINANCE_REFUSAL
-    if LEGAL_QUESTION.search(question):
+    if LEGAL_QUESTION.search(question) or TAX_TREATMENT.search(question):
         return FINANCE_REFUSAL
     if ADVICE.search(question):
         if TAX_LAW.search(question):
@@ -164,8 +183,13 @@ def protect_text(text: str, supplier_addresses: Iterable[str] = ()) -> str:
 
 def protect_answer(text: str, supplier_addresses: Iterable[str] = ()) -> str:
     """Withhold recognisable confidential HR details or advice in a model answer."""
-    if _has_private_pay(text, require_details=True) or (
-        PERFORMANCE.search(text) and PERSON.search(text)
+    if _has_private_pay(text, require_details=True) or DISCIPLINE.search(text) or (
+        PERFORMANCE.search(text) and (PERSON.search(text) or PERSON_PERFORMANCE.search(text))
+    ):
+        return FINANCE_REFUSAL
+    if any(
+        TAX_LAW.search(part) and TAX_INSTRUCTION.search(part)
+        for part in re.split(r"(?<=[.!?;])\s+|\n+", text)
     ):
         return FINANCE_REFUSAL
     parts = re.split(r"(?<=[.!?])\s+|\n+", text)
