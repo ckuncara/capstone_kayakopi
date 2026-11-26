@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -109,6 +110,27 @@ CSV_SOURCE_COLUMNS = {
     "reported_volume": "INT NULL", "volume_measure": "VARCHAR(30) NULL",
     "wastage_kg": "DECIMAL(12,3) NULL", "source_row_number": "INT NULL",
 }
+
+UPLOAD_TABLES = (
+    "uploaded_invoices",
+    "uploaded_invoice_lines",
+    "uploaded_invoice_audits",
+    "uploaded_outlet_csvs",
+    "uploaded_roster_rows",
+)
+
+logger = logging.getLogger(__name__)
+
+
+def schema_privilege_denied(error: BaseException) -> bool:
+    """Return True for MySQL privilege errors, not for bad credentials or outages."""
+    code = error.args[0] if error.args else None
+    message = str(error).lower()
+    return (
+        code in {1044, 1142, 1143}
+        or "command denied" in message
+        or ("access denied" in message and "to database" in message)
+    )
 
 
 def _load_line_items(raw: Any) -> list[dict]:
@@ -229,22 +251,47 @@ class UploadStore:
                 raw_hourly_rate VARCHAR(255), hourly_rate_sgd DECIMAL(12,2), rate_status VARCHAR(30),
                 source_file VARCHAR(700) NOT NULL, INDEX (file_hash))""",
         ]
+        try:
+            with self.repository()._connect() as connection:
+                with connection.cursor() as cursor:
+                    for statement in statements:
+                        cursor.execute(statement)
+                    for table, additions in (("uploaded_roster_rows", ROSTER_SOURCE_COLUMNS), ("uploaded_outlet_csvs", CSV_SOURCE_COLUMNS)):
+                        cursor.execute(f"SHOW COLUMNS FROM {table}")
+                        columns = cast(list[dict[str, Any]], cursor.fetchall())
+                        existing = {row["Field"] for row in columns}
+                        for column, definition in additions.items():
+                            if column not in existing:
+                                try:
+                                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN `{column}` {definition}")
+                                except pymysql.OperationalError as error:
+                                    if not error.args or error.args[0] != 1060:
+                                        raise
+                    self._backfill_invoice_details(cursor)
+        except pymysql.OperationalError as error:
+            if not schema_privilege_denied(error):
+                raise
+            existing = self._existing_upload_tables()
+            missing = [table for table in UPLOAD_TABLES if table not in existing]
+            if missing:
+                raise RuntimeError(
+                    "The MySQL account cannot create upload tables and these tables are missing: "
+                    + ", ".join(missing)
+                    + ". Run ./scripts/reload_data.sh or create them with the application MySQL account."
+                ) from error
+            logger.warning(
+                "MySQL account cannot alter upload schema; using existing upload tables: %s",
+                ", ".join(UPLOAD_TABLES),
+            )
+
+    def _existing_upload_tables(self) -> set[str]:
         with self.repository()._connect() as connection:
             with connection.cursor() as cursor:
-                for statement in statements:
-                    cursor.execute(statement)
-                for table, additions in (("uploaded_roster_rows", ROSTER_SOURCE_COLUMNS), ("uploaded_outlet_csvs", CSV_SOURCE_COLUMNS)):
-                    cursor.execute(f"SHOW COLUMNS FROM {table}")
-                    columns = cast(list[dict[str, Any]], cursor.fetchall())
-                    existing = {row["Field"] for row in columns}
-                    for column, definition in additions.items():
-                        if column not in existing:
-                            try:
-                                cursor.execute(f"ALTER TABLE {table} ADD COLUMN `{column}` {definition}")
-                            except pymysql.OperationalError as error:
-                                if not error.args or error.args[0] != 1060:
-                                    raise
-                self._backfill_invoice_details(cursor)
+                cursor.execute("SHOW TABLES")
+                return {
+                    next(iter(row.values())) if isinstance(row, dict) else row[0]
+                    for row in cursor.fetchall()
+                }
 
     def _backfill_invoice_details(self, cursor: Any) -> None:
         """Populate normalized lines/audits for invoices uploaded before this schema."""

@@ -1,8 +1,10 @@
-"""Live MySQL smoke tests for the six chatbot query tools."""
+"""Live MySQL smoke tests for Copilot query tools."""
 
 from __future__ import annotations
 
 import unittest
+import calendar
+from datetime import date
 
 from kaya_kopi.copilot.tools.kaya import (
     ALL_TOOLS,
@@ -24,7 +26,14 @@ class QueryToolIntegrationTest(unittest.TestCase):
     def test_public_tool_set_is_consolidated(self) -> None:
         self.assertEqual(
             [tool.name for tool in ALL_TOOLS],
-            ["get_outlet_sales_sql", "analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_supplier_addresses_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql", "lookup_invoice_sqlite", "search_invoice_chroma", "discover_mysql_schema", "query_mysql_direct"],
+            [
+                "analyze_outlets_sql", "analyze_staffing_sql", "analyze_pos_sql",
+                "assess_kopi_price_change_sql", "get_outlet_sales_sql", "get_data_coverage_sql",
+                "analyze_suppliers_sql", "get_supplier_addresses_sql", "get_invoice_sql",
+                "get_data_quality_issues_sql", "search_documents_sql", "lookup_invoice_sqlite",
+                "search_invoice_chroma", "query_business_data_sql",
+                "discover_mysql_schema", "query_mysql_direct",
+            ],
         )
 
     def test_get_outlet_sales_infers_alias_effective_source_period_when_dates_are_omitted(self) -> None:
@@ -346,6 +355,40 @@ class QueryToolIntegrationTest(unittest.TestCase):
             self.assertGreater(float(row["observed_pos_takings_sgd"]), 0)
             self.assertIsNone(row["gross_takings_sgd"])
             self.assertFalse(row["productivity_comparable"])
+
+    def test_staffing_ytd_sales_are_limited_to_months_with_roster_coverage(self) -> None:
+        result = analyze_outlets_sql.invoke({
+            "analysis": "staffing",
+            "outlet_type": "mall",
+            "start_date": "2026-01-01",
+            "end_date": "2026-11-26",
+        })
+
+        self.assertTrue(result["ok"], result)
+        requested_months = [f"2026-{month:02d}" for month in range(1, 12)]
+        for row in result["results"]:
+            coverage = row["coverage"]
+            self.assertEqual(coverage["requested_roster_months"], requested_months)
+            self.assertEqual(coverage["sales_months"], row["roster_months"])
+            self.assertEqual(
+                coverage["missing_roster_months"],
+                sorted(set(requested_months) - set(row["roster_months"])),
+            )
+            expected_sales = 0.0
+            for month in row["roster_months"]:
+                year, month_number = map(int, month.split("-"))
+                first = date(year, month_number, 1)
+                last = min(date(year, month_number, calendar.monthrange(year, month_number)[1]), date(2026, 11, 26))
+                expected = get_outlet_sales_sql.invoke({
+                    "outlet_code": row["outlet_code"],
+                    "start_date": first.isoformat(),
+                    "end_date": last.isoformat(),
+                    "include_daily": False,
+                })
+                expected_sales += float(expected["summary"]["total_sales_sgd"])
+            actual_sales = row["gross_takings_sgd"] or row["observed_pos_takings_sgd"]
+            if row["roster_months"]:
+                self.assertAlmostEqual(float(actual_sales), expected_sales, places=2)
 
     def test_staffing_does_not_rank_an_outlet_without_roster_hours(self) -> None:
         result = analyze_outlets_sql.invoke({

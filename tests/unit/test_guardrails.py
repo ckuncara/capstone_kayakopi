@@ -21,6 +21,7 @@ from kaya_kopi.security.guardrails import (
         "How much does Alex earn per hour?",
         "Tell me Alex's salary.",
         "How much do we pay Alex?",
+        "How much was Alex paid?",
         "What are Alex's wages?",
     ],
 )
@@ -33,6 +34,7 @@ def test_individual_pay_questions_are_refused(question):
     [
         "Who reported the broken machine?",
         "Show total staff pay by outlet.",
+        "Which outlets appear overstaffed in June 2026 based on paid roster hours and authoritative gross takings?",
         "What is the GST amount on the invoice?",
         "Should we increase the price of kopi?",
     ],
@@ -72,7 +74,7 @@ def test_sensitive_details_are_redacted_but_supplier_address_can_be_shown():
         assert private not in result
 
 
-def test_private_pay_and_recommendations_do_not_reach_the_answer():
+def test_private_pay_is_withheld_and_price_recommendations_are_preserved():
     assert protect_answer("Alex earns $15 per hour.") == FINANCE_REFUSAL
     assert protect_answer("Alex earns $15 per hour. Total pay by outlet is $100.") == FINANCE_REFUSAL
     result = protect_answer(
@@ -80,8 +82,17 @@ def test_private_pay_and_recommendations_do_not_reach_the_answer():
         "Source: POS records."
     )
     assert "The observed price was $2.00" in result
-    assert "recommend increasing" not in result
+    assert "recommend increasing" in result
     assert "Source: POS records" in result
+
+
+def test_unrelated_business_terms_do_not_append_decision_refusal():
+    answer = (
+        "This reconciliation does not make a business decision. "
+        "The supplier invoice subtotal is SGD 100.00."
+    )
+
+    assert protect_answer(answer) == answer
 
 
 def test_supplier_address_exception_does_not_expose_contact_details():
@@ -137,6 +148,14 @@ def test_supplier_address_lookup_rejects_empty_or_short_names(monkeypatch, suppl
 def test_headcounts_and_outlet_pay_summaries_are_allowed(text):
     assert refuse_request(text) is None
     assert protect_answer(text) == text
+
+
+def test_paid_roster_hours_and_outlet_staffing_are_not_individual_pay_disclosures():
+    answer = (
+        "Mall outlets had 3,472 paid roster hours and S$41,332 in scheduled labour cost; "
+        "POS takings are partial."
+    )
+    assert protect_answer(answer) == answer
 
 
 @pytest.mark.parametrize("text", [

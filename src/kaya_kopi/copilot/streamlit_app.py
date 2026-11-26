@@ -20,6 +20,12 @@ from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM
 from kaya_kopi.copilot.llm_ui_components import (
     format_turn_usage, render_spend_meter, render_team_spend_meter, render_usage_log_panel,
 )
+from kaya_kopi.copilot.result_renderer import (
+    render_business_results,
+    render_scope_alignment,
+    render_specialist_reports,
+)
+from kaya_kopi.copilot.response_format import format_copilot_answer
 from kaya_kopi.security.guardrails import protect_answer, protect_text
 from kaya_kopi.security.openai_proxy import set_proxy_access_token
 from kaya_kopi.security.supabase_auth import render_sign_in, sign_out
@@ -37,18 +43,6 @@ set_proxy_access_token(access_token)
 def _new_thread() -> str:
     return str(uuid.uuid4())
 
-
-def _text_content(content: object) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "".join(
-            str(block.get("text", "")) if isinstance(block, dict) else str(block)
-            for block in content
-        )
-    return str(content)
-
-
 def _tool_evidence(message: ToolMessage) -> tuple[list[str], str | None]:
     """Collect citable files and provenance notes from a tool result."""
     try:
@@ -62,7 +56,6 @@ def _tool_evidence(message: ToolMessage) -> tuple[list[str], str | None]:
         if isinstance(candidate, str):
             note = candidate
     return sources, note
-
 
 def render_sources(sources: list[str], key: str) -> None:
     if not sources:
@@ -95,22 +88,27 @@ def render_sources(sources: list[str], key: str) -> None:
                 finally:
                     workbook.close()
 
-
-def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, str]]:
+def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, object]]:
     state = get_chatbot(token).get_state({"configurable": {"thread_id": thread_id}})
-    history: list[dict[str, str]] = []
+    history: list[dict[str, object]] = []
     turn_id: str | None = None
+    turn_question = ""
     turn_sources: set[str] = set()
     turn_source_note: str | None = None
-    last_answers: dict[str, dict[str, str]] = {}
+    last_answers: dict[str, dict[str, object]] = {}
+    pending_results: list[dict] = []
     messages = state.values.get("messages", [])
     addresses = _supplier_addresses(messages)
     for message in messages:
         if isinstance(message, HumanMessage):
             turn_id = message.id
+            turn_question = protect_text(str(message.content))
             turn_sources = set()
             turn_source_note = None
-            history.append({"role": "user", "content": protect_text(str(message.content))})
+            history.append({"role": "user", "content": turn_question})
+        elif isinstance(message, ToolMessage) and isinstance(message.artifact, dict):
+            if message.artifact.get("result_type") in {"business_data", "specialist_report"}:
+                pending_results.append(message.artifact)
         elif isinstance(message, ToolMessage):
             sources, note = _tool_evidence(message)
             turn_sources.update(sources)
@@ -133,7 +131,6 @@ def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, st
             answer["usage_caption"] = caption
     return history
 
-
 def _text_content(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -143,6 +140,15 @@ def _text_content(content: object) -> str:
             for block in content
         )
     return str(content)
+
+def _render_structured_results(results: list[dict], question: str | None = None) -> None:
+    business_results = [item for item in results if item.get("result_type") == "business_data"]
+    specialist_results = [item for item in results if item.get("result_type") == "specialist_report"]
+    render_scope_alignment(st, results)
+    if business_results:
+        render_business_results(st, business_results, question=question)
+    if specialist_results:
+        render_specialist_reports(st, specialist_results, question=question)
 
 
 if "thread_id" not in st.session_state:
@@ -275,7 +281,12 @@ else:
 
     for index, item in enumerate(st.session_state.message_history):
         with st.chat_message(item["role"]):
-            st.markdown(item["content"])
+            content = item["content"]
+            if item["role"] == "assistant":
+                content = format_copilot_answer(content)
+            st.markdown(content)
+            if item.get("structured_results"):
+                _render_structured_results(item["structured_results"], item.get("question"))
             if item.get("usage_caption"):
                 st.caption(item["usage_caption"])
             if item.get("source_note"):
@@ -292,43 +303,63 @@ else:
         with st.chat_message("assistant"):
             activity = {"status": None, "last_tool": "database tool"}
             turn_metadata: dict[str, str] = {}
+            structured_results: list[dict] = []            
             answer_sources: set[str] = set()
             answer_meta: dict[str, str | None] = {"note": None}
 
+            answer_parts: list[str] = []
             def response_tokens():
                 try:
-                    for message, metadata in stream_chat(
-                        st.session_state.thread_id, prompt, access_token
-                    ):
-                        if isinstance(metadata.get("turn_id"), str):
-                            turn_metadata["turn_id"] = metadata["turn_id"]
-                        if isinstance(message, ToolMessage):
-                            activity["last_tool"] = message.name or "database tool"
-                            result = _text_content(message.content)
-                            sources, note = _tool_evidence(message)
-                            answer_sources.update(sources)
-                            if note:
-                                answer_meta["note"] = note
-                            st.session_state.tool_log.append(
-                                {"name": activity["last_tool"], "result": result}
-                            )
-                            if activity["status"] is None:
-                                activity["status"] = st.status(
-                                    f"Using {activity['last_tool']}…", expanded=False
+                    with st.spinner("Working…"):
+                        for message, metadata in stream_chat(
+                            st.session_state.thread_id, prompt, access_token
+                        ):
+                            if isinstance(metadata.get("turn_id"), str):
+                                turn_metadata["turn_id"] = metadata["turn_id"]
+                            if isinstance(message, ToolMessage):
+                                activity["last_tool"] = message.name or "database tool"
+                                result = _text_content(message.content)
+                                sources, note = _tool_evidence(message)
+                                answer_sources.update(sources)
+                                if note:
+                                    answer_meta["note"] = note
+                                if (
+                                    isinstance(message.artifact, dict)
+                                    and message.artifact.get("result_type")
+                                    in {"business_data", "specialist_report"}
+                                ):
+                                    structured_results.append(message.artifact)
+                                
+                                st.session_state.tool_log.append(
+                                    {"name": activity["last_tool"], "result": result}
                                 )
-                            else:
-                                activity["status"].update(
-                                    label=f"Using {activity['last_tool']}…"
-                                )
-                        elif isinstance(message, AIMessage) and message.content:
-                            yield _text_content(message.content)
+                                if activity["status"] is None:
+                                    activity["status"] = st.status(
+                                        f"Using {activity['last_tool']}…", expanded=False
+                                    )
+                                else:
+                                    activity["status"].update(
+                                        label=f"Using {activity['last_tool']}…"
+                                    )
+                            elif (
+                                isinstance(message, AIMessage)
+                                and message.content
+                                and not message.tool_calls
+                            ):
+                                answer_parts.append(_text_content(message.content))
                 except Exception as error:
-                    yield (
+                    answer_parts[:] = [
                         "I couldn't complete that check. Confirm the database is available and "
                         f"the LLM configuration is valid. Technical detail: `{type(error).__name__}`."
-                    )
+                    ]
 
-            answer = st.write_stream(response_tokens())
+            response_tokens()
+            answer = "".join(answer_parts).strip()
+            if not answer:
+                answer = "I couldn't complete that check because no final answer was returned."
+            st.markdown(format_copilot_answer(answer))
+            if structured_results:
+                _render_structured_results(structured_results, displayed_prompt)
             if activity["status"] is not None:
                 activity["status"].update(
                     label=f"✅ {activity['last_tool']} finished",
@@ -348,9 +379,11 @@ else:
                 st.caption(answer_meta["note"])
             render_sources(sorted(answer_sources), f"live_{len(st.session_state.message_history)}")
 
-        if not isinstance(answer, str):
-            answer = json.dumps(answer, default=str)
-        saved_answer = {"role": "assistant", "content": answer}
+        saved_answer = {
+            "role": "assistant", "content": answer,
+            "structured_results": structured_results,
+            "question": displayed_prompt,
+        }
         if usage_caption:
             saved_answer["usage_caption"] = usage_caption
         if answer_meta["note"]:

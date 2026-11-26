@@ -99,6 +99,7 @@ services:
       KAYA_DB_USER: ${KAYA_DB_USER}
       KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
       KAYA_CHAT_DB: /runtime/kaya_chat.sqlite3
+      KAYA_QUERY_BUSINESS_DATA_ONLY: "${KAYA_QUERY_BUSINESS_DATA_ONLY:-false}"
       KAYA_PROJECT_ROOT: /workspace
       LOCAL_SQLITE_PATH: /workspace/data/kaya_ops.db
       SUPPLIER_INVOICE_DIR: /workspace/data/images/supplier_invoices

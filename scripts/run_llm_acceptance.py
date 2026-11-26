@@ -32,6 +32,10 @@ CASES = [
         "Must use the current Singapore calendar quarter, resolve the four mall outlets, and explain the missing sales coverage and cost per cup without reporting a zero margin.",
     ),
     (
+        "Based on the available sales data, should we increase the price of Kopi by S$0.10?",
+        "Must show deterministic revenue sensitivity and any revenue-only break-even threshold from observed volume, disclose partial POS coverage, and not claim profit impact without recipe cost per cup.",
+    ),
+    (
         "Which supplier raised prices the most this year?",
         "Must use the Singapore calendar year to date, state actual scan coverage, and cite the first and latest invoice lines for the leading comparable increase.",
     ),
@@ -53,7 +57,7 @@ CASES = [
     ),
     (
         "How much did we spend with each supplier by month, and which invoices were excluded or require review?",
-        "Must provide supplier-month figures and identify excluded invoice INV-012601-458 as REVIEW_REQUIRED.",
+        "Must provide supplier-month figures and identify excluded invoice INV-022602-661 as REVIEW_REQUIRED. INV-012601-458 is retained using validated invoice lines.",
     ),
     (
         "Why does purchase record INV-012508-182 not match the scanned invoice? Is GST responsible for the difference?",
@@ -61,7 +65,7 @@ CASES = [
     ),
     (
         "Which supplier increased its prices the most over the past year? Show evidence from the scanned invoice lines.",
-        "Must identify Mewah/SUP-04 condensed milk as the largest comparable percentage increase (15.23%) with first/latest invoice evidence.",
+        "Must identify Mewah/SUP-04 Condensed milk ctn as the largest comparable increase (8.03%) with first/latest invoice evidence, and disclose the observed invoice coverage period.",
     ),
     (
         "Who are our suppliers?",

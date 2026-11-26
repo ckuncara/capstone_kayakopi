@@ -223,7 +223,7 @@ try:
     st.session_state.usage_tracker = processor.budget.usage_tracker
 except Exception as error:
     logging.exception("Upload Desk startup failed")
-    st.error(f"Upload Desk could not start ({type(error).__name__}). Check OpenAI configuration and permissions for upload tables in the existing Kaya MySQL database.")
+    st.error(f"Upload Desk could not start ({type(error).__name__}). Check MySQL permissions for uploaded_* tables and OpenAI/Chroma configuration.")
     st.stop()
 
 initialize_conversations(store, st.session_state)

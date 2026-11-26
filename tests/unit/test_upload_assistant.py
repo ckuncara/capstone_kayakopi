@@ -11,7 +11,11 @@ from PIL import Image
 from openpyxl import Workbook
 
 from kaya_kopi.copilot.tools import kaya
-from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, Settings, UploadStore, citation_path, collect_sources, select_sql
+from kaya_kopi.upload_assistant.storage import (
+    CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, UPLOAD_TABLES,
+    Settings, UploadStore, citation_path, collect_sources, schema_privilege_denied,
+    select_sql,
+)
 from kaya_kopi.upload_assistant.invoice_audit import audit_invoice
 from kaya_kopi.upload_assistant.agent import (
     SYSTEM, UploadAgent, dedupe_manager_refusals, delivery_issue_question,
@@ -486,6 +490,64 @@ def test_roster_column_migration_is_idempotent(tmp_path, monkeypatch):
     cursor.fetchall.return_value = [{"Field": column} for column in {*ROSTER_SOURCE_COLUMNS, *CSV_SOURCE_COLUMNS}]
     store.init_mysql()
     assert not any("ALTER TABLE" in call.args[0] for call in cursor.execute.call_args_list)
+
+
+@pytest.mark.parametrize("code, message", [
+    (1044, "Access denied for user 'restricted_user' to database 'kayakopi'"),
+    (1142, "CREATE command denied to user 'restricted_user' for table 'uploaded_invoices'"),
+    (1143, "SELECT command denied to user 'restricted_user' for table 'uploaded_invoices'"),
+])
+def test_schema_privilege_denied_ignores_bad_credentials_and_outages(code, message):
+    assert schema_privilege_denied(pymysql.OperationalError(code, message))
+    assert not schema_privilege_denied(pymysql.OperationalError(2003, "Can't connect to MySQL server"))
+    assert not schema_privilege_denied(
+        pymysql.OperationalError(1045, "Access denied for user 'restricted_user' (using password: YES)")
+    )
+
+
+def test_init_mysql_uses_existing_tables_when_ddl_privileges_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+    repository = MagicMock()
+    store.repository = Mock(return_value=repository)
+    cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args):
+        if sql.startswith("CREATE TABLE"):
+            raise pymysql.OperationalError(1142, "CREATE command denied")
+        if sql == "SHOW TABLES":
+            cursor.fetchall.return_value = [
+                {"Tables_in_kayakopi": name} for name in UPLOAD_TABLES
+            ]
+        return None
+
+    cursor.execute.side_effect = execute
+
+    store.init_mysql()
+
+    statements = [call.args[0] for call in cursor.execute.call_args_list]
+    assert statements.count("SHOW TABLES") == 1
+    assert not any(sql.startswith("ALTER TABLE") for sql in statements)
+
+
+def test_init_mysql_reports_missing_tables_when_ddl_privileges_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+    repository = MagicMock()
+    store.repository = Mock(return_value=repository)
+    cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args):
+        if sql.startswith("CREATE TABLE"):
+            raise pymysql.OperationalError(1142, "CREATE command denied")
+        if sql == "SHOW TABLES":
+            cursor.fetchall.return_value = []
+        return None
+
+    cursor.execute.side_effect = execute
+
+    with pytest.raises(RuntimeError, match="uploaded_invoices"):
+        store.init_mysql()
 
 
 def test_init_mysql_backfills_legacy_invoice_line_json(tmp_path, monkeypatch):

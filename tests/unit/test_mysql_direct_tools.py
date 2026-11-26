@@ -103,7 +103,7 @@ def test_citation_note_distinguishes_client_from_uploaded_tables():
 
 def test_direct_database_request_gets_priority_hint():
     message = chat_backend._current_system_message(
-        "Compare all outlet sales in 2026 directly from database?"
+        question="Compare all outlet sales in 2026 directly from database?"
     )
 
     assert "explicitly requested direct database retrieval" in message.content
@@ -112,7 +112,7 @@ def test_direct_database_request_gets_priority_hint():
 
 def test_item_purchase_question_gets_priority_hint():
     message = chat_backend._current_system_message(
-        "how much teh we purchase in 2025?"
+        question="how much teh we purchase in 2025?"
     )
 
     assert "explicitly requested direct database retrieval" in message.content
