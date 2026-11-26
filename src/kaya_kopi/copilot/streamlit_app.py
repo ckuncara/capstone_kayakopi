@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 
 from kaya_kopi.config import AppConfig
 from kaya_kopi.copilot.chat_backend import (
-    _supplier_addresses, delete_thread, get_chatbot, get_thread_names, rename_thread,
+    _safe_ai_message, _supplier_addresses, delete_thread, get_chatbot, get_thread_names, rename_thread,
     retrieve_all_threads, stream_chat,
 )
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py, llm_ui_components.py)
@@ -26,7 +26,7 @@ from kaya_kopi.copilot.result_renderer import (
     render_specialist_reports,
 )
 from kaya_kopi.copilot.response_format import format_copilot_answer
-from kaya_kopi.security.guardrails import protect_answer, protect_text
+from kaya_kopi.security.guardrails import protect_text
 from kaya_kopi.security.openai_proxy import set_proxy_access_token
 from kaya_kopi.security.supabase_auth import render_sign_in, sign_out
 from kaya_kopi.upload_assistant.storage import citation_path, collect_sources
@@ -99,6 +99,7 @@ def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, ob
     pending_results: list[dict] = []
     messages = state.values.get("messages", [])
     addresses = _supplier_addresses(messages)
+
     for message in messages:
         if isinstance(message, HumanMessage):
             turn_id = message.id
@@ -106,23 +107,30 @@ def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, ob
             turn_sources = set()
             turn_source_note = None
             history.append({"role": "user", "content": turn_question})
-        elif isinstance(message, ToolMessage) and isinstance(message.artifact, dict):
-            if message.artifact.get("result_type") in {"business_data", "specialist_report"}:
-                pending_results.append(message.artifact)
         elif isinstance(message, ToolMessage):
             sources, note = _tool_evidence(message)
             turn_sources.update(sources)
             if note:
                 turn_source_note = note
-        elif isinstance(message, AIMessage) and message.content:
-            answer = {"role": "assistant", "content": protect_answer(str(message.content), addresses)}
+            if isinstance(message.artifact, dict):
+                if message.artifact.get("result_type") in {"business_data", "specialist_report"}:
+                    pending_results.append(message.artifact)
+        elif isinstance(message, AIMessage) and message.content and not message.tool_calls:
+            answer: dict[str, object] = {
+                "role": "assistant",
+                "content": _safe_ai_message(message, addresses).content,
+                "structured_results": pending_results,
+                "question": turn_question,
+            }
             if turn_sources:
                 answer["sources"] = sorted(turn_sources)
             if turn_source_note:
                 answer["source_note"] = turn_source_note
             history.append(answer)
+            pending_results = []
             if turn_id:
                 last_answers[turn_id] = answer
+
     for saved_turn_id, answer in last_answers.items():
         caption = format_turn_usage(
             st.session_state.usage_tracker.get_turn_usage(thread_id, saved_turn_id)

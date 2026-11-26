@@ -455,7 +455,10 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 def _safe_tool_value(value: object, key: str = "", allow_supplier_address: bool = False) -> object:
-    if key in {"staff_name", "hourly_rate_sgd", "raw_hourly_rate", "hourly_rate", "pay_rate"}:
+    if key.lower() in {
+        "staff_name", "hourly_rate_sgd", "raw_hourly_rate", "hourly_rate", "pay_rate",
+        "salary", "employee_salary", "wage", "employee_pay",
+    }:
         return "[REDACTED]"
     if isinstance(value, dict):
         return {
@@ -601,26 +604,54 @@ def _safe_ai_message(message: AIMessage, addresses: list[str]) -> AIMessage:
             and isinstance(block.get("text", ""), str)
         ]
         content = "".join(text_blocks) if text_blocks else content
+    if message.tool_calls:
+        content = ""
     if isinstance(content, str):
+        candidate = content.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(
+                r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE,
+            )
         try:
-            structured = json.loads(content)
+            structured = json.loads(candidate)
         except json.JSONDecodeError:
             structured = None
-        if isinstance(structured, dict) and {
-            "finding", "key_evidence", "limitations", "recommendation"
-        }.issubset(structured):
-            # Apply the existing text guard to each field so words in separate JSON fields
-            # cannot combine into a false tax/business-advice match.
-            for field in ("finding", "recommendation"):
-                if isinstance(structured[field], str):
-                    structured[field] = protect_answer(structured[field], addresses)
-            for field in ("key_evidence", "limitations"):
-                if isinstance(structured[field], list):
-                    structured[field] = [
-                        protect_answer(item, addresses) if isinstance(item, str) else item
-                        for item in structured[field]
-                    ]
-            content = json.dumps(structured, ensure_ascii=False)
+        if isinstance(structured, dict):
+            finding = structured.get("finding")
+            evidence = structured.get("key_evidence", [])
+            limitations = structured.get("limitations", [])
+            recommendation = structured.get("recommendation")
+            valid = (
+                isinstance(finding, str)
+                and isinstance(evidence, list)
+                and all(isinstance(item, str) for item in evidence)
+                and isinstance(limitations, list)
+                and all(isinstance(item, str) for item in limitations)
+                and (recommendation is None or isinstance(recommendation, str))
+            )
+            if not valid:
+                content = "The model returned an invalid answer format."
+            else:
+                # Only the supported fields can reach the user or conversation history.
+                structured = {
+                    key: structured[key] for key in
+                    ("finding", "key_evidence", "limitations", "recommendation")
+                    if key in structured
+                }
+                # Check fields separately to avoid combining unrelated advice and tax text.
+                for field in ("finding", "recommendation"):
+                    if isinstance(structured.get(field), str):
+                        structured[field] = protect_answer(structured[field], addresses)
+                for field in ("key_evidence", "limitations"):
+                    if field in structured:
+                        structured[field] = [
+                            protect_answer(item, addresses) for item in structured[field]
+                        ]
+                content = json.dumps(structured, ensure_ascii=False)
+        elif isinstance(structured, list):
+            content = "The model returned an invalid answer format."
+        elif isinstance(structured, str):
+            content = protect_answer(structured, addresses)
         else:
             content = protect_answer(content, addresses)
     elif content:

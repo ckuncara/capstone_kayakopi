@@ -30,11 +30,12 @@ Restart the application after changing `.env`. Use a dedicated SELECT-only MySQL
 with per-table grants; application allowlists are not a replacement for database permissions.
 
 Queries should join enabled provenance tables and return `source_uri` or `image_path`.
-The tools validate those paths against actual files in `data`, and the main chat appends
-verified file links when omitted by the model, even for records ingested into MySQL.
-Aggregate queries need a follow-up provenance lookup over contributing records. Missing or
-inaccessible source files are disclosed, never guessed. Links identify source files; serving
-or downloading them in a remote browser is a separate application concern.
+The general query tool checks returned file paths against files in `data`. Aggregate queries
+may need a follow-up provenance lookup over contributing records. Citations from structured
+reports are displayed separately from the answer when present. The main chat does not append
+a `Sources:` suffix or withhold an answer solely because source metadata is missing, and it does
+not prove that a citation supports every claim. Local invoice tools identify the SQLite records
+or Chroma invoice number.
 
 Existing privacy checks remain pattern-based. Only allow data appropriate for every user
 of the chat, preferably pre-redacted tables; arbitrary SQL aliases can weaken field-name
@@ -110,13 +111,16 @@ reopening a chat. This trusts the source field's classification; it does not ind
 that an address is a business address. Other address fields retain the normal checks.
 
 The main copilot checks recognised requests for individual pay, staff discipline or
-performance, legal or tax advice, bulk exports, and external actions before calling the
-model. Tool results and answers are checked for common contact details and confidential HR data.
-An answer is withheld if no tool returned a result in the current turn; this does not prove that
-every statement in an answer is supported by the result.
+performance, private contact details, legal or tax advice, bulk exports, and external actions
+before calling the model. Tool results and answers are checked for common contact details and
+confidential HR data. Citations are rendered in the structured report area when available; missing
+source metadata alone does not block the final answer. Text accompanying a tool call is not
+displayed as an answer, including when reopening an older conversation. Malformed structured
+model answers are replaced with an explicit format error rather than displayed as raw JSON.
+These checks do not prove that every statement in an answer is supported by the source.
 The copilot continues to allow aggregate labour costs and user-initiated invoice uploads.
 
 These are pattern-based checks, not a guarantee that every wording, personal address, or
 indirect disclosure will be detected. Review access controls and existing saved data before
 deployment. Existing conversation checkpoints and source records are not deleted or rewritten
-by these changes.
+by these changes; saved answers are checked again when displayed.

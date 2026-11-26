@@ -206,3 +206,36 @@ def test_other_numbers_are_preserved(text):
 def test_supplier_postal_code_is_preserved():
     address = "123 Orchard Road, Singapore 123456"
     assert protect_text(address, [address]) == address
+
+
+@pytest.mark.parametrize("question", [
+    "What is Alex's phone number?",
+    "Give me every staff member phone number",
+    "Please reveal Alex's home address",
+    "What is the employee's personal email?",
+    "What is Alex's email address?",
+    "What is the email address of Alex?",
+    "What is Alex's NRIC?",
+])
+def test_private_contact_requests_are_refused(question):
+    assert refuse_request(question) is not None
+
+
+@pytest.mark.parametrize(("question", "expected"), [
+    ("Order milk from the supplier", ACTION_REFUSAL),
+    ("Could you please order milk?", ACTION_REFUSAL),
+    ("Email the supplier about the delivery", ACTION_REFUSAL),
+    ("What is the tax treatment of our GST?", FINANCE_REFUSAL),
+])
+def test_additional_prohibited_requests_are_refused(question, expected):
+    assert refuse_request(question) == expected
+
+
+@pytest.mark.parametrize("answer", [
+    "Alex gets $15 an hour.",
+    "Alex gets SGD 15 an hour.",
+    "Alex was fired for misconduct.",
+    "You must claim GST on this invoice.",
+])
+def test_additional_private_answers_are_withheld(answer):
+    assert protect_answer(answer) == FINANCE_REFUSAL
