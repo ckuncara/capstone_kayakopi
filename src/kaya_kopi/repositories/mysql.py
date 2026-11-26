@@ -575,17 +575,63 @@ class MySQLRepository:
             for requested_code in selected:
                 outlet, _alias = self._resolve_outlet(requested_code, start_date, end_date)
                 outlet_rows = roster_by_outlet.get(outlet, [])
-                sales = self.get_outlet_sales(
-                    outlet, start_date, end_date, include_daily=False, include_report_dates=True,
+                covered_months = sorted({row["roster_month"][:7] for row in outlet_rows})
+                sales_periods: list[tuple[date, date]] = []
+                for month in covered_months:
+                    year, month_number = map(int, month.split("-"))
+                    month_start = date(year, month_number, 1)
+                    next_year = year + 1 if month_number == 12 else year
+                    next_month_number = 1 if month_number == 12 else month_number + 1
+                    next_month = date(next_year, next_month_number, 1)
+                    month_end = next_month - timedelta(days=1)
+                    sales_periods.append((max(start_date, month_start), min(end_date, month_end)))
+                sales_parts = [
+                    self.get_outlet_sales(
+                        outlet, period_start, period_end,
+                        include_daily=False, include_report_dates=True,
+                    )
+                    for period_start, period_end in sales_periods
+                ]
+                sales_authorities = {part["authority"] for part in sales_parts}
+                authority = next(iter(sales_authorities)) if len(sales_authorities) == 1 else (
+                    "MIXED_SOURCES" if sales_authorities else "NO_ROSTER_COVERAGE"
                 )
-                matched_days = set(sales["coverage"].get("validated_report_dates", []))
+                matched_days: set[str] = set()
+                observations = 0
+                gross_values: list[Decimal] = []
+                observed_starts: list[str] = []
+                observed_ends: list[str] = []
+                missing_report_days = 0
+                sales_warnings: list[str] = []
+                sales_citations: list[dict[str, Any]] = []
+                for sales in sales_parts:
+                    summary = sales["summary"]
+                    is_authoritative = sales["authority"] == "DAILY_SUMMARY_Z_REPORT"
+                    part_observations = (
+                        summary["included_days"] if is_authoritative
+                        else summary["transaction_count"]
+                    )
+                    observations += part_observations
+                    if part_observations:
+                        gross_values.append(Decimal(summary["total_sales_sgd"]))
+                    matched_days.update(sales["coverage"].get("validated_report_dates", []))
+                    observed_period = sales["coverage"].get("observed_period", {})
+                    if observed_period.get("start"):
+                        observed_starts.append(observed_period["start"])
+                    if observed_period.get("end"):
+                        observed_ends.append(observed_period["end"])
+                    if is_authoritative:
+                        missing_report_days += len(sales["coverage"].get("missing_dates", []))
+                    warning = sales["coverage"].get("warning")
+                    if warning and warning not in sales_warnings:
+                        sales_warnings.append(warning)
+                    sales_citations.append(sales["citation"])
                 matched_counts = Counter((day[:7], date.fromisoformat(day).weekday()) for day in matched_days)
                 paid_hours = Decimal("0")
                 labour_cost = Decimal("0")
                 matched_hours = Decimal("0")
                 matched_labour_cost = Decimal("0")
                 defaulted_assignments: set[int] = set()
-                covered_months = {row["roster_month"][:7] for row in outlet_rows}
                 for row in outlet_rows:
                     key = (row["roster_month"][:7], weekday_names.index(row["day_of_week"]))
                     shift_hours = Decimal(row["paid_hours"] or 0)
@@ -598,13 +644,11 @@ class MySQLRepository:
                     matched_labour_cost += hours_with_sales * hourly_rate
                     if row["rate_status"] == "CLIENT_APPROVED_DEFAULT":
                         defaulted_assignments.add(row["staff_assignment_id"])
-                summary = sales["summary"]
-                authoritative = sales["authority"] == "DAILY_SUMMARY_Z_REPORT"
-                observations = summary["included_days"] if authoritative else summary["transaction_count"]
-                gross = Decimal(summary["total_sales_sgd"]) if observations else None
+                authoritative = authority == "DAILY_SUMMARY_Z_REPORT"
+                gross = sum(gross_values, Decimal("0")) if observations else None
                 comparable = bool(
                     authoritative and gross is not None and matched_hours > 0
-                    and requested_months <= covered_months
+                    and requested_months <= set(covered_months)
                 )
                 results.append(
                     {
@@ -612,11 +656,11 @@ class MySQLRepository:
                         "roster_available": bool(outlet_rows),
                         "paid_hours": f"{paid_hours:.2f}" if outlet_rows else None,
                         "labour_cost_sgd": f"{labour_cost:.2f}" if outlet_rows else None,
-                        "roster_months": sorted(covered_months),
+                        "roster_months": covered_months,
                         "defaulted_rate_assignments": len(defaulted_assignments),
                         "gross_takings_sgd": f"{gross:.2f}" if gross is not None and authoritative else None,
                         "observed_pos_takings_sgd": f"{gross:.2f}" if gross is not None and not authoritative else None,
-                        "revenue_authority": sales["authority"],
+                        "revenue_authority": authority,
                         "productivity_comparable": comparable,
                         "matched_paid_hours": f"{matched_hours:.2f}" if comparable else None,
                         "matched_labour_cost_sgd": f"{matched_labour_cost:.2f}" if comparable else None,
@@ -628,11 +672,18 @@ class MySQLRepository:
                         ),
                         "coverage": {
                             "sales_observations": observations,
-                            "observed_period": sales["coverage"].get("observed_period"),
-                            "missing_report_days": len(sales["coverage"].get("missing_dates", [])) if authoritative else None,
-                            "warning": sales["coverage"].get("warning"),
+                            "requested_roster_months": sorted(requested_months),
+                            "roster_months": covered_months,
+                            "missing_roster_months": sorted(requested_months - set(covered_months)),
+                            "sales_months": covered_months,
+                            "observed_period": {
+                                "start": min(observed_starts) if observed_starts else None,
+                                "end": max(observed_ends) if observed_ends else None,
+                            },
+                            "missing_report_days": missing_report_days if authoritative else None,
+                            "warning": "; ".join(sales_warnings) or None,
                         },
-                        "citation": [sales["citation"], {
+                        "citation": [*sales_citations, {
                             "source_locator": "tables=staff_roster,staff_assignment,staff_shift",
                             "source_uris": sorted({row["source_uri"] for row in outlet_rows}),
                         }],
@@ -645,9 +696,26 @@ class MySQLRepository:
             non_comparable_outlets = [
                 row for row in results if not row["productivity_comparable"]
             ]
+            complete_roster_coverage = all(
+                requested_months <= set(row["roster_months"])
+                for row in results if row["roster_available"]
+            ) and all(row["roster_available"] for row in results)
+            status = (
+                "COMPLETE" if results and complete_roster_coverage
+                else "PARTIAL" if any(row["roster_available"] for row in results)
+                else "NO_OBSERVATIONS"
+            )
+            coverage_warning = None
+            if status == "PARTIAL":
+                coverage_warning = (
+                    "Roster records do not cover every requested month for every selected outlet. "
+                    "Scheduled totals and aligned sales include only months with roster records."
+                )
             return {
                 "analysis": analysis,
                 **scope,
+                "status": status,
+                "coverage_warning": coverage_warning,
                 "results": results,
                 "classification": "NO_APPROVED_OVERSTAFFING_THRESHOLD",
                 "comparable_outlets": comparable_outlets,
@@ -655,8 +723,8 @@ class MySQLRepository:
                 "lowest_comparable_productivity": (
                     comparable_outlets[0] if comparable_outlets else None
                 ),
-                "conclusion": "Show scheduled labour cost and available takings separately. An overstaffing verdict needs an approved benchmark and reliable sales for the roster period. Partial POS takings cannot support a productivity ranking.",
-                "method": "Scheduled totals cover the requested roster period. Productivity ratios compare takings and rostered labour on the same validated Z-report dates, which may differ by outlet. TBC rates use the client-approved S$13/hour default.",
+                "conclusion": "Show scheduled labour cost and available takings separately. Totals include only months with roster records, and sales are limited to those same roster months. An overstaffing verdict needs an approved benchmark and reliable sales for the roster period. Partial POS takings cannot support a productivity ranking.",
+                "method": "Scheduled totals are calculated for each outlet's available roster months within the requested period. Sales are queried for those same months. Productivity ratios compare takings and rostered labour on the same validated Z-report dates, which may differ by outlet. The client-approved S$13/hour default is used only to estimate labour cost for TBC roster rates; it is not a staffing benchmark.",
                 "privacy": "Individual staff names are not returned.",
             }
         if analysis != "performance":
@@ -780,6 +848,21 @@ class MySQLRepository:
                 """,
                 (start_date, end_date + timedelta(days=1), *selected),
             )[0]
+            observed_sales = self._query(
+                POS_CTE + f"""
+                SELECT p.canonical_outlet_code AS outlet_code,
+                       COUNT(*) AS transaction_rows,
+                       SUM(p.qty) AS observed_quantity,
+                       ROUND(SUM(p.total), 2) AS observed_sales_sgd
+                FROM canonical_pos p JOIN menu_items m ON m.item_id = p.item_id
+                WHERE m.item_name = 'Kopi'
+                  AND {outlet_condition if outlet_filter else 'TRUE'}
+                  AND p.tx_time >= %s AND p.tx_time < %s
+                GROUP BY p.canonical_outlet_code
+                ORDER BY p.canonical_outlet_code
+                """,
+                (*selected, start_date, end_date + timedelta(days=1)),
+            )
             return {
                 "analysis": analysis,
                 "status": "INSUFFICIENT_EVIDENCE",
@@ -795,6 +878,11 @@ class MySQLRepository:
                         else "NO_OBSERVATIONS"
                     ),
                 },
+                "observed_sales_by_outlet": observed_sales,
+                "observed_sales_note": (
+                    "These are observed item-level POS rows only. POS exports are partial; figures do not "
+                    "establish complete outlet revenue or Kopi volume."
+                ),
                 "missing_for_margin": [
                     "complete Kopi item sales for these outlets and dates",
                     "approved recipe-level cost per cup for the requested period",
@@ -1013,6 +1101,101 @@ class MySQLRepository:
                     "no exchange rates are applied."
                 ),
                 "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item"},
+            }
+        if analysis == "item_price_summary":
+            if not start_date or not end_date:
+                raise ValueError("start_date and end_date are required for item_price_summary")
+            _validate_period(start_date, end_date)
+            if not 1 <= detail_limit <= 50 or not 1 <= page <= 1000:
+                raise ValueError("page must be 1–1000 and detail_limit must be 1–50")
+            filters = ["i.currency='SGD'", "i.invoice_date BETWEEN %s AND %s"]
+            params: list[Any] = [start_date, end_date]
+            if supplier_query:
+                filters.append("(s.supplier_code=%s OR i.supplier_name LIKE %s)")
+                params.extend([supplier_query.upper(), f"%{supplier_query}%"])
+
+            rows = self._query(
+                f"""SELECT COALESCE(s.supplier_code, UPPER(i.supplier_name)) AS supplier_code,
+                           COALESCE(s.canonical_name, i.supplier_name) AS supplier_name,
+                           MIN(li.description) AS item_description,
+                           ROUND(AVG(CASE WHEN li.line_total_valid=TRUE
+                                               AND li.extraction_status='OK'
+                                               AND li.unit_price IS NOT NULL
+                                          THEN li.unit_price END), 4) AS average_unit_price_sgd,
+                           SUM(li.line_total_valid=TRUE AND li.extraction_status='OK'
+                               AND li.unit_price IS NOT NULL) AS valid_line_count,
+                           SUM(li.line_total_valid=TRUE AND li.extraction_status='OK'
+                               AND li.unit_price IS NOT NULL AND i.is_gst_inclusive=TRUE)
+                               AS valid_gst_inclusive_line_count,
+                           SUM(NOT (li.line_total_valid=TRUE AND li.extraction_status='OK'
+                                    AND li.unit_price IS NOT NULL)) AS excluded_review_line_count
+                    FROM supplier_invoice i
+                    JOIN supplier_invoice_item li USING(supplier_invoice_id)
+                    LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY COALESCE(s.supplier_code, UPPER(i.supplier_name)),
+                             COALESCE(s.canonical_name, i.supplier_name), BINARY li.description
+                    ORDER BY supplier_name, BINARY li.description""",
+                params,
+            )
+            total_excluded = sum(int(row["excluded_review_line_count"] or 0) for row in rows)
+            excluded_params = list(params)
+            excluded_rows = self._query(
+                f"""SELECT COALESCE(s.supplier_code, UPPER(i.supplier_name)) AS supplier_code,
+                           COALESCE(s.canonical_name, i.supplier_name) AS supplier_name,
+                           li.description AS item_description, i.invoice_number, i.invoice_date,
+                           li.line_number, li.unit_price, li.quantity, li.amount,
+                           i.currency, i.extraction_status AS invoice_extraction_status,
+                           li.extraction_status AS line_extraction_status, li.line_total_valid,
+                           li.review_notes,
+                           CASE WHEN li.unit_price IS NULL THEN 'MISSING_UNIT_PRICE'
+                                WHEN li.line_total_valid=FALSE THEN 'INVALID_LINE_TOTAL'
+                                WHEN li.extraction_status<>'OK' THEN 'LINE_EXTRACTION_REVIEW'
+                                ELSE 'REVIEW_REQUIRED' END AS exclusion_reason,
+                           d.source_uri,
+                           CONCAT(d.source_uri, '#invoice=', i.invoice_number,
+                                  ';line=', li.line_number) AS citation
+                    FROM supplier_invoice i
+                    JOIN supplier_invoice_item li USING(supplier_invoice_id)
+                    LEFT JOIN supplier s ON UPPER(s.canonical_name)=UPPER(i.supplier_name)
+                    JOIN source_document d ON d.source_document_id=i.source_document_id
+                    WHERE {' AND '.join(filters)}
+                      AND NOT (li.line_total_valid=TRUE AND li.extraction_status='OK'
+                               AND li.unit_price IS NOT NULL)
+                    ORDER BY supplier_name, BINARY li.description, i.invoice_date,
+                             i.invoice_number, li.line_number
+                    LIMIT %s OFFSET %s""",
+                [*excluded_params, detail_limit, (page - 1) * detail_limit],
+            ) if total_excluded else []
+            has_more = page * detail_limit < total_excluded
+            valid_total = sum(int(row["valid_line_count"] or 0) for row in rows)
+            return {
+                "analysis": analysis,
+                "period": {"start": start_date.isoformat(), "end": end_date.isoformat()},
+                "supplier_query": supplier_query,
+                "currency": "SGD",
+                "average_basis": (
+                    "Arithmetic mean of recorded unit_price values on SGD invoice lines; prices "
+                    "are not normalized for GST inclusion. "
+                    "Only lines with line_total_valid=TRUE, extraction_status=OK, and a non-null "
+                    "unit_price are included. Exact item descriptions are grouped case-sensitively."
+                ),
+                "results": rows,
+                "summary": [{
+                    "valid_line_count": valid_total,
+                    "excluded_review_line_count": total_excluded,
+                    "excluded_review_details_returned": len(excluded_rows),
+                    "excluded_review_details_next_page": page + 1 if has_more else None,
+                }],
+                "valid_line_count": valid_total,
+                "excluded_review_line_count": total_excluded,
+                "excluded_review_lines": excluded_rows,
+                "excluded_review_page": {
+                    "number": page,
+                    "page_size": detail_limit,
+                    "next_page": page + 1 if has_more else None,
+                },
+                "citation": {"source_locator": "tables=supplier_invoice,supplier_invoice_item,source_document"},
             }
         if analysis == "price_change":
             return self._supplier_price_change(supplier_query, start_date, end_date, item, page, detail_limit)

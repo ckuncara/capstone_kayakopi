@@ -9,12 +9,24 @@ set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+KAYA_DB_READONLY_USER="${KAYA_DB_READONLY_USER:-copilot_reader}"
+KAYA_DB_READONLY_PASSWORD="${KAYA_DB_READONLY_PASSWORD:-change_me_readonly}"
+export KAYA_DB_READONLY_USER KAYA_DB_READONLY_PASSWORD
 
 identifier_pattern='^[A-Za-z0-9_]+$'
 credential_pattern='^[A-Za-z0-9_.@%+-]+$'
 [[ "$KAYA_DB_USER" =~ $identifier_pattern ]] || { echo "error: unsafe KAYA_DB_USER" >&2; exit 2; }
 [[ "$KAYA_DB_PASSWORD" =~ $credential_pattern ]] || {
   echo "error: KAYA_DB_PASSWORD may contain letters, numbers, and ._@%+- only" >&2
+  exit 2
+}
+[[ "$KAYA_DB_READONLY_USER" =~ $identifier_pattern ]] || { echo "error: unsafe KAYA_DB_READONLY_USER" >&2; exit 2; }
+[[ "$KAYA_DB_READONLY_PASSWORD" =~ $credential_pattern ]] || {
+  echo "error: KAYA_DB_READONLY_PASSWORD may contain letters, numbers, and ._@%+- only" >&2
+  exit 2
+}
+[[ "$KAYA_DB_READONLY_USER" != "$KAYA_DB_USER" ]] || {
+  echo "error: Copilot read-only account must differ from the ingestion database account" >&2
   exit 2
 }
 
@@ -43,4 +55,5 @@ echo "Reloading kayakopi from private source data..."
 "${mysql_command[@]}" --execute="CREATE USER IF NOT EXISTS '$KAYA_DB_USER'@'%' IDENTIFIED BY '$KAYA_DB_PASSWORD'; ALTER USER '$KAYA_DB_USER'@'%' IDENTIFIED BY '$KAYA_DB_PASSWORD'; GRANT ALL PRIVILEGES ON \`kayakopi\`.* TO '$KAYA_DB_USER'@'%'; FLUSH PRIVILEGES;"
 
 docker compose --profile setup run --rm --build ingest
+./scripts/provision_copilot_readonly.sh
 echo "Reload complete. Run ./scripts/test.sh, then ./scripts/start.sh."

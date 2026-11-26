@@ -46,7 +46,7 @@ The deterministic test command does not call the LLM. To manually review the non
 answers against the project acceptance questions after loading the database, run:
 
 ```bash
-docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
+docker compose --profile test run --rm -e PYTHONPATH=/workspace/src test python -m scripts.run_llm_acceptance
 ```
 
 This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
