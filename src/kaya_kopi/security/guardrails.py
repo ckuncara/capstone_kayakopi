@@ -22,7 +22,7 @@ DECISION_REFUSAL = (
 WITHHELD = "This information was withheld because it may contain confidential details."
 
 PAY = re.compile(
-    r"\b(?:pay(?:roll|s|ing)?|paid|salary|salaries|wages?|earn(?:s|ed|ings)?|"
+    r"\b(?:pay(?:roll|s|ing)?|salary|salaries|wages?|earn(?:s|ed|ings)?|"
     r"hourly\s+rates?|rates?\s+per\s+hour)\b",
     re.I,
 )
@@ -57,7 +57,8 @@ HOURLY = re.compile(r"\b(?:hourly\s+rates?|rates?\s+per\s+hour|per\s+hour)\b|/hr
 PERSONAL_PAY = re.compile(
     r"(?i:\b(?:earns?|earned|is\s+paid|was\s+paid)\b|"
     r"\bper\s+(?:employee|staff|worker|person)\b)|"
-    r"\b(?:pay|paid)\s+[A-Z][a-z]+\b"
+    r"\b(?:pay|paid)\s+[A-Z][a-z]+\b|"
+    r"\bwas\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?\s+paid\b"
 )
 ADVICE = re.compile(
     r"\b(?:should|recommend\w*|advis\w*|best\s+(?:choice|option)|"
@@ -100,7 +101,7 @@ POSTAL_CODE = re.compile(
 
 def _has_private_pay(text: str, require_details: bool = False) -> bool:
     for passage in re.split(r"(?<=[.!?;])\s+|\n+", text):
-        if not PAY.search(passage):
+        if not PAY.search(passage) and not PERSONAL_PAY.search(passage):
             continue
         if require_details and not (
             PERSON.search(passage)
@@ -167,11 +168,12 @@ def protect_answer(text: str, supplier_addresses: Iterable[str] = ()) -> str:
         PERFORMANCE.search(text) and PERSON.search(text)
     ):
         return FINANCE_REFUSAL
-    if ADVICE.search(text) and (TAX_LAW.search(text) or PRICING.search(text)):
-        parts = re.split(r"(?<=[.!?])\s+|\n+", text)
-        safe_parts = [
-            part for part in parts
-            if not (ADVICE.search(part) and (TAX_LAW.search(part) or PRICING.search(part)))
-        ]
-        text = "\n".join(safe_parts + [DECISION_REFUSAL])
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    restricted_parts = [
+        part for part in parts
+        if ADVICE.search(part) and (TAX_LAW.search(part))
+    ]
+    if restricted_parts:
+        safe_parts = [part for part in parts if part not in restricted_parts]
+        text = "\n".join([*safe_parts, DECISION_REFUSAL])
     return protect_text(text, supplier_addresses)

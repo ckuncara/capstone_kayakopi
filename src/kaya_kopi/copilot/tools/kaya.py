@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.mysql import MySQLRepository
+from kaya_kopi.copilot.text_to_sql import query_business_data_sql
 from kaya_kopi.security.budget_guard import BudgetGuard
 from kaya_kopi.security.pdpa_scrubber import scrub_pdpa
 
@@ -89,7 +90,12 @@ class AnalyzeOutletsInput(BaseModel):
 
 
 class AnalyzePosInput(BaseModel):
-    analysis: Literal["product_mix", "observed_prices", "payment_modes", "time_of_day", "margin"]
+    analysis: Literal["product_mix", "observed_prices", "payment_modes", "time_of_day", "margin"] = Field(
+        description=(
+            "POS product mix, observed prices, payments, time patterns, or Kopi margin evidence. "
+            "The margin mode checks POS coverage and required cost inputs; it does not invent recipe costs."
+        )
+    )
     outlet_codes: list[str] = Field(default_factory=list, max_length=12)
     outlet_type: Literal["mall", "kopitiam"] | None = Field(
         default=None, description="Filter using the outlet master; use mall for mall outlets."
@@ -99,16 +105,28 @@ class AnalyzePosInput(BaseModel):
     menu_item: str | None = None
 
 
+class StaffingInput(BaseModel):
+    outlet_codes: list[str] = Field(default_factory=list, max_length=12)
+    outlet_type: Literal["mall", "kopitiam"] | None = None
+    start_date: date | None = Field(default=None, description="Inclusive roster month/date range start")
+    end_date: date | None = Field(default=None, description="Inclusive roster month/date range end")
+
+
 class AnalyzeSuppliersInput(BaseModel):
-    analysis: Literal["invoice", "spend", "cost_trend", "price_change", "reconciliation"]
+    analysis: Literal[
+        "invoice", "spend", "cost_trend", "price_change", "item_price_summary", "reconciliation"
+    ] = Field(description=(
+        "Use item_price_summary for scanned SGD invoice average unit prices grouped by supplier and "
+        "exact item description, including valid-line counts and review-excluded lines."
+    ))
     supplier_query: str | None = None
     invoice_number: str | None = None
     start_date: date | None = None
     end_date: date | None = None
     group_by: Literal["all", "supplier", "month", "supplier_month"] = "supplier"
     item: str | None = Field(default=None, description="Item description filter for price changes")
-    page: int = Field(default=1, ge=1, le=1000, description="Price-change detail page")
-    detail_limit: int = Field(default=10, ge=1, le=50, description="Price-change rows per page")
+    page: int = Field(default=1, ge=1, le=1000, description="Detail page for price-change or excluded-line records")
+    detail_limit: int = Field(default=10, ge=1, le=50, description="Rows per price-change or excluded-line detail page")
 
 
 class DataCoverageInput(BaseModel):
@@ -155,15 +173,28 @@ def analyze_outlets_sql(
     outlet_codes: list[str] | None = None,
     outlet_type: str | None = None,
 ) -> dict[str, Any]:
-    """Analyze outlet performance, measured wastage, scheduled staffing or roster headcounts.
+    """Return outlet performance, measured wastage, or roster headcounts.
 
-    Omit both dates for undated wastage or staffing questions. Use outlet_type='mall'
-    for mall stalls. On follow-ups, keep the previous dates and outlet filters except
-    where the user changes them. Report partial POS takings separately from labour cost.
-    Use headcount for staff counts by outlet and role (for example baristas); omit both
-    dates for the latest roster month. Headcounts are rostered staff, not attendance.
+    Wastage results cover measured records only and include coverage information; outlets
+    without measurements must not be treated as having zero wastage. Use
+    ``analyze_staffing_sql`` for paid-hour and labour-cost analysis.
     """
     return _call("analyze_outlets", analysis, outlet_codes or [], start_date, end_date, outlet_type)
+
+
+@tool("analyze_staffing_sql", args_schema=StaffingInput)
+def analyze_staffing_sql(
+    outlet_codes: list[str] | None = None,
+    outlet_type: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict[str, Any]:
+    """Return aggregated planned staffing hours and labour costs by outlet.
+
+    This calculation is retained because individual pay fields are excluded from the approved SQL
+    catalog. Roster patterns are not attendance and do not establish overstaffing.
+    """
+    return _call("analyze_outlets", "staffing", outlet_codes or [], start_date, end_date, outlet_type)
 
 
 @tool("analyze_pos_sql", args_schema=AnalyzePosInput)
@@ -172,7 +203,11 @@ def analyze_pos_sql(
     outlet_codes: list[str] | None = None, menu_item: str | None = None,
     outlet_type: str | None = None,
 ) -> dict[str, Any]:
-    """Check Kopi margin evidence or analyze observed product mix, prices, payments, and time patterns."""
+    """Analyze observed POS product evidence, including Kopi margin coverage and missing inputs.
+
+    POS exports are partial and missing rows do not establish zero sales. Margin requires verified
+    recipe cost per cup; scanned supplier unit prices alone are not per-cup costs.
+    """
     return _call("analyze_pos", analysis, outlet_codes or [], start_date, end_date, menu_item, outlet_type)
 
 
@@ -183,11 +218,12 @@ def analyze_suppliers_sql(
     group_by: str = "supplier",
     item: str | None = None, page: int = 1, detail_limit: int = 10,
 ) -> dict[str, Any]:
-    """Use MySQL for supplier spend, price changes, and invoice reconciliation.
+    """Return scanned-invoice totals, item price summaries, price comparisons, or reconciliation.
 
-    Use supplier_month grouping for monthly spend. For price_change, cite the first and
-    latest invoice lines and report the observed period. Keep dates, supplier and item
-    on follow-ups unless changed. Use invoice to inspect a cited invoice's structured details.
+    The analysis and group_by arguments select the report. Price changes compare validated
+    lines for the same supplier and exact item description; result rows include endpoint
+    invoice evidence and comparison coverage. item_price_summary averages valid SGD line prices
+    by supplier and exact item description, and reports lines excluded for review.
     """
     return _call("analyze_suppliers", analysis, supplier_query, invoice_number, start_date, end_date, group_by, item, page, detail_limit)
 
@@ -357,15 +393,18 @@ def search_invoice_chroma(query: str, config: RunnableConfig) -> str:
 
 
 ALL_TOOLS = [
-    get_outlet_sales_sql,
     analyze_outlets_sql,
+    analyze_staffing_sql,
     analyze_pos_sql,
+    assess_kopi_price_change_sql,
+    get_outlet_sales_sql,
+    get_data_coverage_sql,
     analyze_suppliers_sql,
     get_supplier_addresses_sql,
-    get_data_coverage_sql,
-    search_documents_sql,
-    assess_kopi_price_change_sql,
+    get_invoice_sql,
     get_data_quality_issues_sql,
+    search_documents_sql,
     lookup_invoice_sqlite,
     search_invoice_chroma,
+    query_business_data_sql,
 ]
