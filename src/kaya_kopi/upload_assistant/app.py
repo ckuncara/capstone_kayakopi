@@ -325,7 +325,9 @@ with chat_tab:
                     result = agent.ask(st.session_state.upload_desk_messages, thread_id=st.session_state.upload_desk_thread_id, turn_id=turn_id)
             except Exception as error:
                 logging.exception("Upload Desk lookup failed")
-                result = {"content": f"The lookup could not complete ({type(error).__name__}). Check service availability and API configuration.", "sources": [], "tools": []}
+                detail = str(getattr(error, "message", error)).replace("\n", " ").strip()[:300]
+                suffix = f" Detail: {detail}" if detail else ""
+                result = {"content": f"The lookup could not complete ({type(error).__name__}). Check service availability and API configuration.{suffix}", "sources": [], "tools": []}
             result["content"] = protect_answer(result["content"])
             result["turn_id"] = turn_id
             if not result.get("usage_caption"):

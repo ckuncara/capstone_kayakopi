@@ -43,14 +43,39 @@ docker compose down             # stop services; preserve database volumes
 ```
 
 The deterministic test command does not call the LLM. To manually review the non-deterministic
-answers against the project acceptance questions after loading the database, run:
+answers after loading the database, run the Ops Copilot or Upload Desk acceptance scenario set:
 
 ```bash
+# Ops Copilot: 29 scenarios
 docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
+
+# Upload Desk: 31 scenarios, including tool traces and source files
+docker compose --profile test run --rm test python -m scripts.run_upload_acceptance
 ```
 
-This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
-it is intentionally not part of the automated test suite.
+Both runners accept `--model NAME`, `--all-latest-models`, `--case N` (repeatable) and
+`--list-models`. The latest GPT-6 variants are:
+
+```text
+gpt-6.2-astra  gpt-6.2-sol  gpt-6.1-terra  gpt-6.1-sol
+gpt-6-astra    gpt-6-sol    gpt-6-luna
+```
+
+The spend meter shows the rate card for the configured model, and usage logging uses the same
+per-model rate. Each listed model has its own entry in `MODEL_PRICING`, so a business rate change
+can be applied to one model without affecting the others. The current rates are the **Standard,
+short-context** values from [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
+(checked 2026-11-26); Batch/Fast/Flex/Ultrafast and long-context rates are not used by default.
+
+For example, to check only scenarios 1, 10 and 11 with one model:
+
+```bash
+docker compose --profile test run --rm test python -m scripts.run_upload_acceptance \
+  --model gpt-6.2-astra --case 1 --case 10 --case 11
+```
+
+The runners use the configured OpenAI-compatible endpoint/key and print each answer beside its
+expected evidence checklist; they are intentionally not part of the automated test suite.
 
 ### Remembered sign-in
 

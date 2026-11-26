@@ -57,6 +57,14 @@ CLIENT_TABLE_GUIDANCE = {
         "purpose": "Client menu master: item names, categories and listed base prices.",
         "rules": "Join item_id to pos_transactions.item_id when enabled. base_price is a master/list price, not proof of the price charged at a historical date. Use POS unit_price for observed prices; menu prices alone cannot establish margin.",
     },
+    "supplier_invoice": {
+        "purpose": "Scanned supplier invoice headers with invoice dates, currency, GST and canonical totals.",
+        "rules": "Filter invoice_date for the requested period and keep currencies separate. A header total covers the whole invoice, not one item. Join supplier_invoice_item on supplier_invoice_id for item-level totals, and source_document on source_document_id to return source_uri citations.",
+    },
+    "supplier_invoice_item": {
+        "purpose": "Scanned supplier invoice item lines for item-level purchase totals and unit-price evidence.",
+        "rules": "Join supplier_invoice on supplier_invoice_id and filter invoice_date. Recorded descriptions include 'Tea dust 5kg' for teh/tea; match with description LIKE '%tea%' and name the matched description in the answer. SUM(amount) is the pre-GST line total, not cash paid, profit, or all expenses. Keep provenance: return source_document.source_uri per row, or GROUP_CONCAT(DISTINCT source_document.source_uri) AS source_uris when grouping; the app parses comma-separated paths.",
+    },
 }
 
 

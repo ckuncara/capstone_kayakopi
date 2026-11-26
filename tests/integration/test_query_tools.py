@@ -24,7 +24,7 @@ class QueryToolIntegrationTest(unittest.TestCase):
     def test_public_tool_set_is_consolidated(self) -> None:
         self.assertEqual(
             [tool.name for tool in ALL_TOOLS],
-            ["get_outlet_sales_sql", "analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql", "lookup_invoice_sqlite", "search_invoice_chroma"],
+            ["get_outlet_sales_sql", "analyze_outlets_sql", "analyze_pos_sql", "analyze_suppliers_sql", "get_supplier_addresses_sql", "get_data_coverage_sql", "search_documents_sql", "assess_kopi_price_change_sql", "get_data_quality_issues_sql", "lookup_invoice_sqlite", "search_invoice_chroma", "discover_mysql_schema", "query_mysql_direct"],
         )
 
     def test_get_outlet_sales_infers_alias_effective_source_period_when_dates_are_omitted(self) -> None:

@@ -23,6 +23,12 @@ from openai.types.chat import (
 
 from kaya_kopi.copilot.tools.direct_access import allowed_tables
 from kaya_kopi.security.guardrails import protect_answer, protect_text, refuse_request
+from kaya_kopi.security.openai_proxy import (
+    message_text,
+    model_temperature_kwargs,
+    reasoning_effort_kwargs,
+    tool_request_kwargs,
+)
 from kaya_kopi.upload_assistant.existing_data_tools import (
     discover_database_schema,
     query_database,
@@ -226,9 +232,12 @@ def pricing_scenario_answer(question: str, store: Any) -> dict | None:
     delta = price_delta(question)
     if delta is None:
         content = (
-            "I can prepare a per-unit sensitivity scenario, but no change amount was given. "
-            "State the change per cup (for example, SGD 0.10) and, if it is not all kopi, "
-            "the exact item."
+            "I can't provide a price-increase figure. The records show selling prices and "
+            "volumes, but not the matched per-cup cost of goods sold, ingredient yield or "
+            "wastage, or a full allocation of rent and labour. There is therefore no verified "
+            "basis for a safe increase. If you provide a proposed change per cup (for example, "
+            "SGD 0.10) and the exact item, I can show its revenue sensitivity and the break-even "
+            "volume change. Any change needs Finance and Admin Manager sign-off."
         )
         return {"content": protect_answer(content), "sources": [], "tools": []}
     try:
@@ -733,10 +742,10 @@ class UploadAgent:
         has_evidence = False
         provenance_needed = False
         last_failed = False
-        model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+        model = os.getenv("OPENAI_CHAT_MODEL", "gpt-6-luna")
 
-        def finish(content: str | None) -> dict:
-            answer = protect_answer(content or "No answer was returned.")
+        def finish(content: Any) -> dict:
+            answer = protect_answer(message_text(content) or "No answer was returned.")
             if not has_evidence:
                 answer = "I couldn't verify an answer from the available records. Check the upload inventory and database connections."
             else:
@@ -750,13 +759,21 @@ class UploadAgent:
             if step == 0 and requested_history:
                 choice = {"type": "function", "function": {"name": "lookup_outlet_history"}}
                 messages.append({"role": "system", "content": f"Look up history for {requested_history} with lookup_outlet_history now, returning its source evidence."})
+            request = tool_request_kwargs(model, choice, tools)
+            if choice == "required" and "tool_choice" not in request:
+                messages.append({"role": "system", "content": "Call at least one of the provided tools before answering. Do not answer this question from general knowledge."})
             response = self.processor.client.chat.completions.create(
-                model=model, messages=messages, tools=tools, temperature=0,
-                tool_choice=choice,
+                model=model, messages=messages,
+                **request, **model_temperature_kwargs(model, 0),
+                **reasoning_effort_kwargs(model),
             )
             self.processor.log(response, "upload-assistant-chat", model)
             message = response.choices[0].message
             if not message.tool_calls:
+                if not activity and not has_evidence and step < 7:
+                    messages.append({"role": "system", "content": "You must call a tool now. Retrieve the relevant records before giving an answer."})
+                    last_failed = True
+                    continue
                 return finish(message.content)
             messages.append(cast(ChatCompletionAssistantMessageParam, message.model_dump(exclude_none=True)))
             last_failed = False
@@ -792,8 +809,10 @@ class UploadAgent:
         self.processor.budget.check_budget_or_raise()
         messages.append({"role": "system", "content": "You have reached the tool-call limit. Do not call more tools. Answer only from evidence already returned; state clearly what could not be verified."})
         response = self.processor.client.chat.completions.create(
-            model=model, messages=messages, tools=tools, temperature=0,
-            tool_choice="none",
+            model=model, messages=messages,
+            **tool_request_kwargs(model, "none", tools),
+            **model_temperature_kwargs(model, 0),
+            **reasoning_effort_kwargs(model),
         )
         self.processor.log(response, "upload-assistant-chat", model)
         message = response.choices[0].message

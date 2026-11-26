@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from pathlib import Path
 
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from openpyxl import load_workbook
 
 from kaya_kopi.config import AppConfig
 from kaya_kopi.copilot.chat_backend import (
@@ -21,6 +23,7 @@ from kaya_kopi.copilot.llm_ui_components import (
 from kaya_kopi.security.guardrails import protect_answer, protect_text
 from kaya_kopi.security.openai_proxy import set_proxy_access_token
 from kaya_kopi.security.supabase_auth import render_sign_in, sign_out
+from kaya_kopi.upload_assistant.storage import citation_path, collect_sources
 
 
 st.set_page_config(page_title="Kaya Kopi Ops Copilot", page_icon="☕", layout="wide")
@@ -35,21 +38,93 @@ def _new_thread() -> str:
     return str(uuid.uuid4())
 
 
+def _text_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            str(block.get("text", "")) if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content)
+
+
+def _tool_evidence(message: ToolMessage) -> tuple[list[str], str | None]:
+    """Collect citable files and provenance notes from a tool result."""
+    try:
+        value = json.loads(_text_content(message.content))
+    except (json.JSONDecodeError, TypeError):
+        return [], None
+    sources = collect_sources(value) if isinstance(value, (dict, list)) else []
+    note = None
+    if message.name == "query_mysql_direct" and isinstance(value, dict):
+        candidate = value.get("citation_note")
+        if isinstance(candidate, str):
+            note = candidate
+    return sources, note
+
+
+def render_sources(sources: list[str], key: str) -> None:
+    if not sources:
+        return
+    st.caption("Source Files")
+    for index, source in enumerate(sources):
+        path = citation_path(source)
+        if path is None:
+            st.caption(f"Unavailable: {Path(source).name}")
+            continue
+        with st.expander(protect_text(path.name)):
+            st.caption(protect_text(source))
+            st.download_button(
+                "Download original", path.read_bytes(), file_name=path.name,
+                key=f"{key}_{index}", icon=":material/download:",
+            )
+            if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                st.image(str(path), width=450)
+            elif path.suffix.lower() == ".csv":
+                st.code(path.read_text(encoding="utf-8-sig", errors="replace")[:12000], language="csv")
+            elif path.suffix.lower() in {".txt", ".md", ".eml"}:
+                st.text(path.read_text(encoding="utf-8-sig", errors="replace")[:12000])
+            elif path.suffix.lower() == ".xlsx":
+                workbook = load_workbook(path, read_only=True, data_only=True)
+                try:
+                    st.dataframe([
+                        {"Worksheet": sheet.title, "Rows": sheet.max_row, "Columns": sheet.max_column}
+                        for sheet in workbook
+                    ], hide_index=True)
+                finally:
+                    workbook.close()
+
+
 def _load_history(thread_id: str, token: str | None = None) -> list[dict[str, str]]:
     state = get_chatbot(token).get_state({"configurable": {"thread_id": thread_id}})
     history: list[dict[str, str]] = []
     turn_id: str | None = None
+    turn_sources: set[str] = set()
+    turn_source_note: str | None = None
     last_answers: dict[str, dict[str, str]] = {}
     messages = state.values.get("messages", [])
     addresses = _supplier_addresses(messages)
     for message in messages:
         if isinstance(message, HumanMessage):
             turn_id = message.id
+            turn_sources = set()
+            turn_source_note = None
             history.append({"role": "user", "content": protect_text(str(message.content))})
+        elif isinstance(message, ToolMessage):
+            sources, note = _tool_evidence(message)
+            turn_sources.update(sources)
+            if note:
+                turn_source_note = note
         elif isinstance(message, AIMessage) and message.content:
-            history.append({"role": "assistant", "content": protect_answer(str(message.content), addresses)})
+            answer = {"role": "assistant", "content": protect_answer(str(message.content), addresses)}
+            if turn_sources:
+                answer["sources"] = sorted(turn_sources)
+            if turn_source_note:
+                answer["source_note"] = turn_source_note
+            history.append(answer)
             if turn_id:
-                last_answers[turn_id] = history[-1]
+                last_answers[turn_id] = answer
     for saved_turn_id, answer in last_answers.items():
         caption = format_turn_usage(
             st.session_state.usage_tracker.get_turn_usage(thread_id, saved_turn_id)
@@ -198,11 +273,14 @@ else:
             "Try: **Compare AMK-01, AMK-03 and JUR-01 sales for July 2025.**"
         )
 
-    for item in st.session_state.message_history:
+    for index, item in enumerate(st.session_state.message_history):
         with st.chat_message(item["role"]):
             st.markdown(item["content"])
             if item.get("usage_caption"):
                 st.caption(item["usage_caption"])
+            if item.get("source_note"):
+                st.caption(item["source_note"])
+            render_sources(item.get("sources", []), f"history_{index}")
 
     prompt = st.chat_input("Ask about sales, invoices, suppliers, documents, or data quality")
     if prompt:
@@ -214,6 +292,8 @@ else:
         with st.chat_message("assistant"):
             activity = {"status": None, "last_tool": "database tool"}
             turn_metadata: dict[str, str] = {}
+            answer_sources: set[str] = set()
+            answer_meta: dict[str, str | None] = {"note": None}
 
             def response_tokens():
                 try:
@@ -225,6 +305,10 @@ else:
                         if isinstance(message, ToolMessage):
                             activity["last_tool"] = message.name or "database tool"
                             result = _text_content(message.content)
+                            sources, note = _tool_evidence(message)
+                            answer_sources.update(sources)
+                            if note:
+                                answer_meta["note"] = note
                             st.session_state.tool_log.append(
                                 {"name": activity["last_tool"], "result": result}
                             )
@@ -260,10 +344,17 @@ else:
                 )
                 if usage_caption:
                     st.caption(usage_caption)
+            if answer_meta["note"]:
+                st.caption(answer_meta["note"])
+            render_sources(sorted(answer_sources), f"live_{len(st.session_state.message_history)}")
 
         if not isinstance(answer, str):
             answer = json.dumps(answer, default=str)
         saved_answer = {"role": "assistant", "content": answer}
         if usage_caption:
             saved_answer["usage_caption"] = usage_caption
+        if answer_meta["note"]:
+            saved_answer["source_note"] = answer_meta["note"]
+        if answer_sources:
+            saved_answer["sources"] = sorted(answer_sources)
         st.session_state.message_history.append(saved_answer)

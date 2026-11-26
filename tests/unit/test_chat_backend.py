@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_openai.chat_models.base import OpenAIInvalidRequestError
 from streamlit.testing.v1 import AppTest
 
 from kaya_kopi.copilot import chat_backend
@@ -30,6 +31,50 @@ def test_refused_question_does_not_construct_or_call_chatbot(monkeypatch, questi
     result = list(chat_backend.stream_chat("thread", question))
     assert "Finance and Admin Manager" in result[0][0].content
     get_chatbot.assert_not_called()
+
+
+def test_safe_ai_message_normalises_block_content():
+    message = AIMessage(content=[
+        {"type": "text", "text": "Our suppliers are A and B."},
+    ])
+
+    safe = chat_backend._safe_ai_message(message, [])
+
+    assert safe.content == "Our suppliers are A and B."
+
+
+def test_custom_chat_model_is_sent_to_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    graph = Mock()
+    graph.stream.return_value = iter([{"chat": {"messages": [AIMessage(content="ok")]}}])
+    get_chatbot = Mock(return_value=graph)
+    monkeypatch.setattr(chat_backend, "get_chatbot", get_chatbot)
+
+    result = list(chat_backend.stream_chat(
+        "thread", "how much teh we purchase in 2025?"
+    ))
+
+    assert result[-1][0].content == "ok"
+    get_chatbot.assert_called_once()
+
+
+def test_invalid_request_error_names_configured_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    graph = Mock()
+    graph.stream.side_effect = OpenAIInvalidRequestError(
+        "invalid model", response=Mock(), body=None,
+    )
+    get_chatbot = Mock(return_value=graph)
+    monkeypatch.setattr(chat_backend, "get_chatbot", get_chatbot)
+
+    result = list(chat_backend.stream_chat("thread", "how much teh?"))
+
+    content = result[-1][0].content
+    assert "gpt-4o-mini" in content
+    assert "provider rejected" in content
+    get_chatbot.assert_called_once()
 
 
 def test_tool_evidence_and_answer_are_protected_before_checkpoint(tmp_path, monkeypatch):
@@ -467,4 +512,49 @@ def test_answer_usage_footer_sums_tool_calls_and_survives_reopening(tmp_path, mo
         assert expected in [caption.value for caption in app.caption]
         assert model.invoke.call_count == 2
     finally:
+        chat_backend.get_chatbot.cache_clear()
+
+
+def test_direct_mysql_sources_are_saved_and_rendered(tmp_path, monkeypatch):
+    source = "data/tabular/daily_summary_AMK-01.csv"
+    note = "Cite the returned data paths as Markdown file links."
+
+    @tool("query_mysql_direct")
+    def direct_example(sql: str) -> dict:
+        """Return synthetic direct MySQL evidence."""
+        return {
+            "ok": True,
+            "rows": [{"source_file": source}],
+            "citations": [source],
+            "citation_note": note,
+        }
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = [
+        AIMessage(content="", tool_calls=[{
+            "name": "query_mysql_direct", "args": {"sql": "SELECT * FROM daily_outlet_summary"},
+            "id": "direct",
+        }]),
+        AIMessage(content=f"Observed source: {source}."),
+    ]
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [direct_example])
+    chat_backend.get_chatbot.cache_clear()
+    graph = chat_backend.get_chatbot()
+    try:
+        app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=30).run()
+        app.chat_input[0].set_value("Show the daily summary source.").run()
+        assert not app.exception
+        saved = app.session_state["message_history"][-1]
+        assert saved["sources"] == [source]
+        assert saved["source_note"] == note
+        assert "Source Files" in [caption.value for caption in app.caption]
+        assert source in [caption.value for caption in app.caption]
+    finally:
+        graph.checkpointer.conn.close()
         chat_backend.get_chatbot.cache_clear()

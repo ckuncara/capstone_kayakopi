@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import sqlite3
 from datetime import datetime
 from functools import lru_cache
@@ -16,6 +18,10 @@ from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage, SystemMessage, AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
+from langchain_openai.chat_models.base import (
+    OpenAIAuthenticationError,
+    OpenAIInvalidRequestError,
+)
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -24,9 +30,17 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker  # Added for LLM spend meter (llm_usage_tracker.py)
 from kaya_kopi.copilot.tools import ALL_TOOLS
 from kaya_kopi.config import AppConfig
-from kaya_kopi.security.openai_proxy import openai_client_options
+from kaya_kopi.security.openai_proxy import (
+    message_text,
+    model_temperature_kwargs,
+    openai_client_options,
+    reasoning_effort_kwargs,
+)
 from kaya_kopi.paths import project_root
 from kaya_kopi.security.guardrails import FINANCE_REFUSAL, protect_answer, protect_text, refuse_request
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are the Kaya Kopi operations copilot.
@@ -85,12 +99,49 @@ For MySQL analysis follow-ups, reuse the last relevant query's effective dates, 
 and outlets unless the user changes them. Use the dates returned by the tool when it defaulted
 the period. If the user names specific outlets, use those codes. For a request to see the invoice
 evidence, start with the exact invoice numbers and line citations returned by the price query.
+
+For item-level purchase totals such as "how much teh we purchase in 2025", do not call
+analyze_suppliers_sql with analysis="spend": it aggregates whole invoices and ignores its item
+filter. Use direct MySQL retrieval: discover_mysql_schema, then one SELECT joining
+supplier_invoice_item to supplier_invoice (and source_document for source_uri), matching the
+recorded description such as LIKE '%tea%' for teh/tea, with the requested date filter. Report the
+matched description, the summed pre-GST amount, the invoices counted, and the source citations.
+If a GROUP BY would hide source_uri, add GROUP_CONCAT(DISTINCT source_document.source_uri) AS
+source_uris; the app parses comma-separated paths. If the same item also appears in
+uploaded_invoice_lines, keep client and uploaded evidence separate and never add them together.
+
+For database questions, especially any request that says "directly from the database" or asks
+for a comparison, total, or list across tables, use direct MySQL retrieval first: call
+discover_mysql_schema, then query_mysql_direct with one SELECT using only the returned tables and
+exact columns. Use a specialist tool instead when it supplies validation or provenance that a
+plain query cannot, such as supplier addresses, headcount, margin coverage, invoice evidence, or
+price-change analysis; then follow that tool's constraints exactly. The direct tool can read both
+the enabled client tables and Upload Desk uploaded_* tables. Keep those sources distinct, do not
+double-count the same purchase in both, and never mix currencies. Return source_file or source_uri
+before calling an uploaded-file citation; client-table figures are database results, not uploaded
+files. A successful empty result means no matching rows, not zero activity. Do not use direct SQL
+to infer unit cost, full expense allocation, legal or tax conclusions.
 """
 
 
-def _current_system_message() -> SystemMessage:
+DIRECT_DATABASE_REQUEST = re.compile(
+    r"\b(?:directly|straight)\s+from\s+(?:the\s+)?(?:mysql\s+)?database\b"
+    r"|\bquery\s+(?:the\s+)?database\b"
+    r"|\bdatabase\s+query\b"
+    r"|\bhow\s+much\b.{0,80}\b(?:purchase|purchased|buy|bought|spend|spent)\b",
+    re.IGNORECASE,
+)
+
+
+def _current_system_message(question: str | None = None) -> SystemMessage:
     today = datetime.now(ZoneInfo("Asia/Singapore")).date().isoformat()
-    return SystemMessage(content=f"Today's date in Asia/Singapore is {today}.\n\n{SYSTEM_PROMPT}")
+    content = f"Today's date in Asia/Singapore is {today}.\n\n{SYSTEM_PROMPT}"
+    if question and DIRECT_DATABASE_REQUEST.search(question):
+        content += (
+            "\n\nThe user explicitly requested direct database retrieval. Call "
+            "discover_mysql_schema first, then query_mysql_direct, before any specialist tool."
+        )
+    return SystemMessage(content=content)
 
 
 class ChatState(TypedDict):
@@ -141,8 +192,10 @@ def _safe_ai_message(message: AIMessage, addresses: list[str]) -> AIMessage:
     content = message.content
     if isinstance(content, str):
         content = protect_answer(content, addresses)
-    elif content:
-        content = "The model returned an unsupported answer format."
+    else:
+        # Some models return text as content blocks instead of one plain string.
+        text = message_text(content)
+        content = protect_answer(text, addresses) if text else "No answer was returned."
     calls = [
         {**call, "args": _safe_tool_value(call["args"])}
         for call in message.tool_calls
@@ -243,9 +296,11 @@ def get_chatbot(access_token: str | None = None):
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Copy .env.example to .env and add the team API key."
         )
+    model_name = os.getenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
     model = ChatOpenAI(
-        model=os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini"),
-        temperature=0,
+        model=model_name,
+        **model_temperature_kwargs(model_name, 0),
+        **reasoning_effort_kwargs(model_name),
         timeout=30,
         max_retries=2,
         **openai_client_options(cfg, "chat", access_token=access_token),
@@ -267,17 +322,19 @@ def get_chatbot(access_token: str | None = None):
         from langchain_core.messages import HumanMessage
 
         messages = []
+        question = ""
         for message in _repair_interrupted_tool_calls(state["messages"]):
             if isinstance(message, SystemMessage):
                 continue
             if isinstance(message, ToolMessage):
                 message = _safe_tool_message(message)
             elif isinstance(message, HumanMessage) and isinstance(message.content, str):
+                question = message.content
                 message = message.model_copy(update={"content": protect_text(message.content)})
             elif isinstance(message, AIMessage):
                 message = _safe_ai_message(message, _supplier_addresses(messages))
             messages.append(message)
-        messages.insert(0, _current_system_message())
+        messages.insert(0, _current_system_message(question))
         
         # Invoke model and capture response with token usage (llm_usage_tracker.py)
         response = model_with_tools.invoke(messages)
@@ -370,32 +427,49 @@ def stream_chat(
         yield AIMessage(content=refusal), {}
         return
     message = protect_text(message)
+    model_name = os.getenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
     config = {"configurable": {"thread_id": thread_id}}
     turn_id = str(uuid4())
-    
+
     # Get the shared tracker from Streamlit session state (llm_usage_tracker.py, llm_ui_components.py)
     if "usage_tracker" not in st.session_state:
         st.session_state.usage_tracker = LLMUsageTracker()
     tracker = st.session_state["usage_tracker"]
-    model_name = os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
-    
+
     # Stream with stream_mode="updates" to capture token data
     # In "updates" mode, we get deltas like {"chat": state} or {"tools": state}
-    for update in get_chatbot(access_token).stream(
-        {"messages": [HumanMessage(content=message, id=turn_id)]},
-        config=config,
-        stream_mode="updates",
-    ):
-        # In "updates" mode, each update is a dict: {"node_name": state_update}
-        for node_name, node_state in update.items():
-            if "messages" in node_state:
-                messages = node_state["messages"]
-                if messages:
-                    for msg in messages:
-                        if isinstance(msg, AIMessage):
-                            tracker.log_response(
-                                thread_id, message, msg, model_name, turn_id=turn_id,
-                            )
-                        
-                        # Yield every message for the UI to handle
-                        yield (msg, {"turn_id": turn_id})
+    try:
+        for update in get_chatbot(access_token).stream(
+            {"messages": [HumanMessage(content=message, id=turn_id)]},
+            config=config,
+            stream_mode="updates",
+        ):
+            # In "updates" mode, each update is a dict: {"node_name": state_update}
+            for node_name, node_state in update.items():
+                if "messages" in node_state:
+                    messages = node_state["messages"]
+                    if messages:
+                        for msg in messages:
+                            if isinstance(msg, AIMessage):
+                                tracker.log_response(
+                                    thread_id, message, msg, model_name, turn_id=turn_id,
+                                )
+
+                            # Yield every message for the UI to handle
+                            yield (msg, {"turn_id": turn_id})
+    except OpenAIInvalidRequestError as error:
+        logger.warning("Chat model %s rejected by provider: %s", model_name, error)
+        yield AIMessage(content=(
+            f"The provider rejected chat model `{model_name}`. Confirm that this model is "
+            "available from the configured endpoint and supports tool calling. If you use a "
+            "custom provider, set `OPENAI_BASE_URL` or `LLM_PROXY_URL` to its endpoint. "
+            f"Technical detail: `{type(error).__name__}`."
+        )), {}
+        return
+    except OpenAIAuthenticationError as error:
+        logger.warning("OpenAI authentication failed for chat model %s: %s", model_name, error)
+        yield AIMessage(content=(
+            "OpenAI authentication failed. Check the team API key or sign-in session. "
+            f"Technical detail: `{type(error).__name__}`."
+        )), {}
+        return

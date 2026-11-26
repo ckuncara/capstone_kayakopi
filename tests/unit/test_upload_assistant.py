@@ -14,12 +14,23 @@ from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE
 from kaya_kopi.upload_assistant.invoice_audit import audit_invoice
 from kaya_kopi.upload_assistant.agent import (
     UploadAgent, dedupe_manager_refusals, history_outlet, parse_period,
-    price_delta, pricing_question, safe_result, uploaded_item_question,
+    price_delta, pricing_question, pricing_scenario_answer, safe_result,
+    uploaded_item_question,
     uploaded_purchase_answer, with_source_warning,
 )
+from kaya_kopi.upload_assistant import ingestion as upload_ingestion
 from kaya_kopi.upload_assistant.ingestion import InvoiceExtraction, RosterBatch, RosterRow, UploadProcessor, parse_outlet_csv, roster_sheets, roster_source_fields
 from kaya_kopi.config import AppConfig
 from kaya_kopi.security.budget_guard import BudgetGuard
+
+
+def test_openai_client_honors_custom_base_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example/v1/")
+
+    client = upload_ingestion.openai_client()
+
+    assert str(client.base_url).rstrip("/") == "https://llm.example/v1"
 
 
 def test_archive_manifest_and_sources_use_data_type_folders(tmp_path, monkeypatch):
@@ -583,6 +594,16 @@ def test_price_delta_and_pricing_question_detect_per_cup_changes(question):
     assert pricing_question(question)
 
 
+def test_price_increase_question_explains_missing_cost_evidence():
+    answer = pricing_scenario_answer(
+        "how much we can increase the price for Teh/Tea?", object()
+    )
+
+    assert "can't provide a price-increase figure" in answer["content"]
+    assert "no verified basis for a safe increase" in answer["content"]
+    assert "proposed change per cup" in answer["content"]
+
+
 def test_pricing_question_returns_per_unit_sensitivity(processor, monkeypatch):
     agent = UploadAgent(processor)
     tool = Mock()
@@ -742,7 +763,7 @@ def test_step_limit_falls_back_to_answer_from_existing_evidence(processor):
     assert processor.client.chat.completions.create.call_args_list[-1].kwargs["tool_choice"] == "none"
 
 
-@pytest.mark.parametrize("configured,expected", [("gpt-4o", "gpt-4o"), (None, "gpt-4o-mini")])
+@pytest.mark.parametrize("configured,expected", [("gpt-4o", "gpt-4o"), (None, "gpt-6-luna")])
 def test_chat_uses_only_openai_chat_model(processor, monkeypatch, configured, expected):
     monkeypatch.setenv("UPLOAD_AI_CHAT_MODEL", "unused-legacy-model")
     if configured is None:
@@ -755,6 +776,21 @@ def test_chat_uses_only_openai_chat_model(processor, monkeypatch, configured, ex
     agent.ask([{"role": "user", "content": "Check invoice records"}])
     assert processor.client.chat.completions.create.call_args.kwargs["model"] == expected
     assert processor.log.call_args.args[2] == expected
+
+
+def test_gpt_6_luna_chat_calls_omit_temperature(processor, monkeypatch):
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-6-luna")
+    processor.client.chat.completions.create.return_value = model_message("No verified data.")
+    agent = UploadAgent(processor)
+    agent.existing_schema = Mock(return_value={})
+
+    agent.ask([{"role": "user", "content": "Check invoice records"}])
+
+    calls = processor.client.chat.completions.create.call_args_list
+    for call in calls:
+        assert "temperature" not in call.kwargs
+        assert "tool_choice" not in call.kwargs
+        assert call.kwargs["reasoning_effort"] == "none"
 
 
 def usage_response(input_tokens, output_tokens):

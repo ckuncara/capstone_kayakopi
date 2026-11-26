@@ -18,21 +18,56 @@ from langchain_core.messages import AIMessage
 from kaya_kopi.paths import project_root
 
 
-# Standard USD per 1M tokens; review against the provider before changing rates.
-# https://developers.openai.com/api/docs/pricing (checked 2026-11-24)
-PRICING_VERSION = "openai-standard-2026-11-24"
+# Standard USD per 1M tokens, short context (<=272K input tokens).
+# Source: https://developers.openai.com/api/docs/pricing (checked 2026-11-26).
+# Review against the provider before changing rates. Batch/Fast/Flex/Ultrafast and
+# long-context rates are deliberately not used: normal chat calls use Standard.
+PRICING_VERSION = "openai-standard-short-context-2026-11-26"
+
+
+def rate(input_price: str, cached_input: str, output_price: str) -> dict[str, str]:
+    """Build one independently editable model rate card."""
+    return {"input": input_price, "cached_input": cached_input, "output": output_price}
+
+
 MODEL_PRICING = {
-    "gpt-4o": {"input": "2.50", "cached_input": "1.25", "output": "10"},
-    "gpt-4o-mini": {"input": "0.15", "cached_input": "0.075", "output": "0.60"},
-    "text-embedding-3-small": {"input": "0.02", "cached_input": "0.02", "output": "0"},
-    "text-embedding-3-large": {"input": "0.13", "cached_input": "0.13", "output": "0"},
+    "gpt-4o": rate("2.50", "1.25", "10.00"),
+    "gpt-4o-mini": rate("0.15", "0.075", "0.60"),
+    "gpt-4.1": rate("2.00", "0.50", "8.00"),
+    "gpt-4.1-mini": rate("0.40", "0.10", "1.60"),
+    # Official Standard pricing for the latest GPT-6 chat models. Each model has
+    # its own card; changing one here does not change any other model's estimate.
+    "gpt-6.2-astra": rate("8.00", "0.40", "40.00"),
+    "gpt-6.2-sol": rate("2.00", "0.10", "10.00"),
+    "gpt-6.1-terra": rate("1.00", "0.05", "5.00"),
+    "gpt-6.1-sol": rate("2.00", "0.10", "10.00"),
+    "gpt-6-astra": rate("10.00", "1.00", "50.00"),
+    "gpt-6-sol": rate("2.00", "0.20", "10.00"),
+    "gpt-6-luna": rate("0.10", "0.01", "0.50"),
+    "text-embedding-3-small": rate("0.02", "0.02", "0"),
+    "text-embedding-3-large": rate("0.13", "0.13", "0"),
 }
 MODEL_ALIASES = {
     "gpt-4o-mini-2024-07-18": "gpt-4o-mini",
     "gpt-4o-2024-08-06": "gpt-4o",
     "gpt-4o-2024-11-20": "gpt-4o",
+    "openai/gpt-4.1": "gpt-4.1",
+    "openai/gpt-4.1-mini": "gpt-4.1-mini",
 }
 logger = logging.getLogger(__name__)
+
+
+def canonical_model_name(model_name: str) -> str:
+    """Strip known aliases and provider prefixes before looking up pricing."""
+    name = MODEL_ALIASES.get(model_name, model_name)
+    if name.startswith("openai/") or name.startswith("openrouter/"):
+        name = name.split("/", 1)[1]
+    return name
+
+
+def pricing_for_model(model_name: str) -> dict[str, str] | None:
+    """Return the configured official rate card, or None for an unpriced model."""
+    return MODEL_PRICING.get(canonical_model_name(model_name))
 
 BUDGET_USD = 50.0
 
@@ -171,7 +206,7 @@ class LLMUsageTracker:
             raise ValueError("Cached input cannot exceed total input tokens.")
         if output_tokens is not None and reasoning_tokens > output_tokens:
             raise ValueError("Reasoning tokens cannot exceed total output tokens.")
-        pricing = MODEL_PRICING.get(MODEL_ALIASES.get(model_name, model_name))
+        pricing = pricing_for_model(model_name)
         total_tokens = (
             input_tokens + output_tokens
             if input_tokens is not None and output_tokens is not None else None
@@ -345,7 +380,7 @@ class LLMUsageTracker:
 
     def get_current_model(self) -> str:
         """Get the currently configured LLM model."""
-        return os.getenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
+        return os.getenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
 
     def get_budget_info(self) -> dict:
         """Get budget information."""

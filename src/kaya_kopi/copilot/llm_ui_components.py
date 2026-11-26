@@ -10,8 +10,12 @@ from zoneinfo import ZoneInfo
 import httpx
 import streamlit as st
 
-from kaya_kopi.config import AppConfig
-from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker, TurnUsageSummary
+from kaya_kopi.config import AppConfig, set_chat_model, suggested_chat_models
+from kaya_kopi.copilot.llm_usage_tracker import (
+    LLMUsageTracker,
+    TurnUsageSummary,
+    pricing_for_model,
+)
 from kaya_kopi.security.guardrails import protect_text
 from kaya_kopi.security.supabase_auth import current_access_token
 
@@ -29,6 +33,18 @@ def format_turn_usage(summary: TurnUsageSummary | None) -> str | None:
     return (
         f"Model: {', '.join(summary['models'])} | Tokens: {token_text} | "
         f"Estimated cost: {cost_text}"
+    )
+
+
+def format_model_pricing(model: str) -> str:
+    """Show the rate card used for the currently configured chat model."""
+    pricing = pricing_for_model(model)
+    if not pricing:
+        return f"No rate card is configured for `{model}`; its usage will be unpriced."
+    return (
+        f"Standard short-context rate card for `{model}` (USD / 1M tokens): "
+        f"input ${pricing['input']}, cached input ${pricing['cached_input']}, "
+        f"output ${pricing['output']}."
     )
 
 
@@ -113,7 +129,34 @@ def _render_spend_meter(tracker: LLMUsageTracker) -> None:
     latest = tracker.get_latest_usage()
     unpriced = tracker.get_unpriced_count(current_month=True)
     st.markdown("### 💰 LLM Spend Meter")
-    st.markdown(f"**Configured chat model:** `{tracker.get_current_model()}`")
+    current_model = tracker.get_current_model()
+    suggestions = suggested_chat_models()
+    st.markdown(f"**Configured chat model:** `{current_model}`")
+    st.caption(format_model_pricing(current_model))
+    with st.popover("Edit chat model", icon=":material/edit:"):
+        st.caption("Saved to both `.env` and `.env.example`; both chat apps will request this model.")
+        st.caption(
+            "Any valid model name is accepted. The configured provider must support it and "
+            "tool calling. Set `OPENAI_BASE_URL` for an OpenAI-compatible endpoint."
+        )
+        st.caption(f"Suggestions: {', '.join(suggestions)}")
+        with st.form("chat_model_form"):
+            model = st.text_input(
+                "Chat model", value=current_model, key="chat_model_input",
+                help=f"Common choices: {', '.join(suggestions)}",
+            )
+            submitted = st.form_submit_button("Save chat model")
+        if submitted:
+            try:
+                updated = set_chat_model(model)
+            except (OSError, ValueError) as error:
+                st.error(str(error))
+            else:
+                from kaya_kopi.copilot.chat_backend import get_chatbot
+
+                get_chatbot.cache_clear()
+                st.success(f"Chat model saved: {updated}")
+                st.rerun()
     st.caption("Local USD estimates, not provider billing. Refreshes every 5 seconds.")
     if latest:
         st.markdown(f"**Last returned/requested model:** `{latest['model_name']}`")

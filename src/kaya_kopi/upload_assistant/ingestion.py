@@ -30,6 +30,7 @@ from kaya_kopi.ingestion.parsers.staff_roster import DAYS, _normalise_rate
 from kaya_kopi.ingestion.parsers.tabular import SCHEMAS as DAILY_CSV_SCHEMAS, parse_decimal
 from kaya_kopi.security.budget_guard import BudgetGuard
 from kaya_kopi.security.guardrails import protect_text
+from kaya_kopi.security.openai_proxy import model_temperature_kwargs, reasoning_effort_kwargs
 from kaya_kopi.upload_assistant.invoice_audit import audit_invoice, db_flag
 from kaya_kopi.upload_assistant.storage import UploadStore
 
@@ -255,7 +256,8 @@ def openai_client() -> OpenAI:
     key = os.getenv("OPENAI_API_KEY", "")
     if not key:
         raise ValueError("Set OPENAI_API_KEY before processing files or chatting.")
-    return OpenAI(api_key=key, base_url="https://api.openai.com/v1", timeout=60, max_retries=2)
+    base_url = os.getenv("OPENAI_BASE_URL", "").rstrip("/") or "https://api.openai.com/v1"
+    return OpenAI(api_key=key, base_url=base_url, timeout=60, max_retries=2)
 
 
 class UploadProcessor:
@@ -301,7 +303,8 @@ class UploadProcessor:
     def structured(self, model: str, schema: type[BaseModel], instruction: str, content):
         self.budget.check_budget_or_raise()
         response = self.client.beta.chat.completions.parse(
-            model=model, temperature=0, response_format=schema,
+            model=model, **model_temperature_kwargs(model, 0),
+            **reasoning_effort_kwargs(model), response_format=schema,
             messages=[{"role": "system", "content": instruction}, {"role": "user", "content": content}],
         )
         self.log(response, "structured-upload", model)
@@ -379,7 +382,7 @@ class UploadProcessor:
             image.verify()
         encoded = base64.b64encode(content).decode("ascii")
         invoice = self.structured(
-            os.getenv("OPENAI_OCR_MODEL", "gpt-4o-mini"), InvoiceExtraction,
+            os.getenv("OPENAI_OCR_MODEL", "gpt-6-luna"), InvoiceExtraction,
             "Extract only visible supplier invoice facts. Missing fields are null. Dates are ISO. "
             "Extract every printed item line with its exact quantity, unit price and amount. "
             "Capture the printed GST rate percent and whether prices already include GST; use null "

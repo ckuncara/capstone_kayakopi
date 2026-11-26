@@ -10,6 +10,50 @@ from kaya_kopi.copilot.llm_usage_tracker import LLMUsageTracker
 from kaya_kopi.security.budget_guard import BudgetExceededError, BudgetGuard
 
 
+def test_custom_model_has_pricing_and_passes_budget_guard(tmp_path):
+    db_path = tmp_path / "usage.db"
+    tracker = LLMUsageTracker(db_path)
+
+    cost = tracker.log_usage("t", "q", "gpt-6-luna", 1_000_000, 1_000_000)
+
+    assert cost == pytest.approx(0.60)
+    BudgetGuard(db_path).check_budget_or_raise()
+
+
+@pytest.mark.parametrize(("model", "expected_cost"), [
+    ("gpt-6.2-astra", 48.00),
+    ("gpt-6.2-sol", 12.00),
+    ("gpt-6.1-terra", 6.00),
+    ("gpt-6.1-sol", 12.00),
+    ("gpt-6-astra", 60.00),
+    ("gpt-6-sol", 12.00),
+    ("gpt-6-luna", 0.60),
+    ("openai/gpt-6.2-astra", 48.00),
+    ("openrouter/gpt-6-luna", 0.60),
+])
+def test_latest_models_use_their_official_standard_pricing(tmp_path, model, expected_cost):
+    db_path = tmp_path / "usage.db"
+    tracker = LLMUsageTracker(db_path)
+
+    cost = tracker.log_usage("t", "q", model, 1_000_000, 1_000_000)
+
+    assert cost == pytest.approx(expected_cost)
+    BudgetGuard(db_path, monthly_limit_usd=100).check_budget_or_raise()
+
+
+@pytest.mark.parametrize("model", [
+    "gpt-6",
+    "gpt-6-pro",
+    "gpt-6-luna-2026-01-01",
+    "openai/gpt-6-pro",
+])
+def test_unlisted_gpt6_models_are_not_silently_priced(tmp_path, model):
+    tracker = LLMUsageTracker(tmp_path / "usage.db")
+
+    assert tracker.log_usage("t", "q", model, 1_000_000, 1_000_000) is None
+    assert tracker.get_unpriced_count() == 1
+
+
 def test_chat_logs_both_model_calls_and_preserves_messages(tmp_path):
     tracker = LLMUsageTracker(tmp_path / "usage.db")
     first = AIMessage(
