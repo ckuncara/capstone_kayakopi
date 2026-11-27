@@ -158,16 +158,20 @@ def test_invoice_ocr_logs_tracker_fields(tmp_path: Path, monkeypatch):
         "parsed": invoice,
         "parsing_error": None,
     }
-    monkeypatch.setattr(invoice_vision_audit, "ChatOpenAI", Mock(return_value=model))
+    chat_model = Mock(return_value=model)
+    monkeypatch.setattr(invoice_vision_audit, "ChatOpenAI", chat_model)
     guard = BudgetGuard(tmp_path / "usage.sqlite3")
 
     invoice_vision_audit.extract_invoice_with_openai(b"image", budget_guard=guard, branch_code="AMK-01")
 
     usage = guard.usage_tracker.get_latest_usage()
     assert usage["thread_id"] == "ocr_vision:AMK-01"
-    assert usage["model_name"] == "gpt-4o-mini"
+    assert usage["model_name"] == "gpt-6-luna"
     assert usage["input_tokens"] == 1750
     assert usage["output_tokens"] == 350
+    assert chat_model.call_args.kwargs["model"] == "gpt-6-luna"
+    assert "temperature" not in chat_model.call_args.kwargs
+    assert chat_model.call_args.kwargs["reasoning_effort"] == "none"
     model.with_structured_output.assert_called_once_with(InvoiceOCRResult, include_raw=True)
 
 

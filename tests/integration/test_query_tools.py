@@ -32,6 +32,7 @@ class QueryToolIntegrationTest(unittest.TestCase):
                 "analyze_suppliers_sql", "get_supplier_addresses_sql", "get_invoice_sql",
                 "get_data_quality_issues_sql", "search_documents_sql", "lookup_invoice_sqlite",
                 "search_invoice_chroma", "query_business_data_sql",
+                "discover_mysql_schema", "query_mysql_direct",
             ],
         )
 

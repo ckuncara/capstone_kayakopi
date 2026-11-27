@@ -96,8 +96,8 @@ services:
       HOME: /runtime
       KAYA_DB_HOST: mysql
       KAYA_DB_PORT: ${KAYA_DB_PORT:-3306}
-      KAYA_DB_USER: ${KAYA_DB_READONLY_USER:-copilot_reader}
-      KAYA_DB_PASSWORD: ${KAYA_DB_READONLY_PASSWORD:-change_me_readonly}
+      KAYA_DB_USER: ${KAYA_DB_USER}
+      KAYA_DB_PASSWORD: ${KAYA_DB_PASSWORD}
       KAYA_CHAT_DB: /runtime/kaya_chat.sqlite3
       KAYA_QUERY_BUSINESS_DATA_ONLY: "${KAYA_QUERY_BUSINESS_DATA_ONLY:-false}"
       KAYA_PROJECT_ROOT: /workspace

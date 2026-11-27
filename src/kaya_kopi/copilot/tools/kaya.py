@@ -14,6 +14,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from kaya_kopi.copilot.tools.mysql_direct import DIRECT_MYSQL_TOOLS
 from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.mysql import MySQLRepository
 from kaya_kopi.copilot.text_to_sql import query_business_data_sql
@@ -407,4 +408,5 @@ ALL_TOOLS = [
     lookup_invoice_sqlite,
     search_invoice_chroma,
     query_business_data_sql,
+    *DIRECT_MYSQL_TOOLS,
 ]

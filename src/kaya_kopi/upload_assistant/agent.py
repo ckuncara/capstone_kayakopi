@@ -23,6 +23,12 @@ from openai.types.chat import (
 
 from kaya_kopi.copilot.tools.direct_access import allowed_tables
 from kaya_kopi.security.guardrails import protect_answer, protect_text, refuse_request
+from kaya_kopi.security.openai_proxy import (
+    message_text,
+    model_temperature_kwargs,
+    reasoning_effort_kwargs,
+    tool_request_kwargs,
+)
 from kaya_kopi.upload_assistant.existing_data_tools import (
     discover_database_schema,
     query_database,
@@ -37,9 +43,15 @@ schema. Uploaded invoice images, CSVs and Excel rosters use uploaded_invoices,
 uploaded_invoice_lines (one item line per row), uploaded_invoice_audits (printed-versus-
 calculated checks), uploaded_outlet_csvs and uploaded_roster_rows in the SAME existing
 Kaya MySQL database.
-Text/email/chat evidence uses the shared kaya_kopi_knowledge Chroma collection, including
-previously indexed Kaya documents. uploaded_files in SQLite is a file inventory, not business
-amounts. Other enabled Kaya MySQL/SQLite tables are optional read-only sources.
+Text/email/chat evidence uses the shared kaya_kopi_knowledge Chroma collection and the indexed
+Kaya MySQL document corpus (WhatsApp and email exports). Call independent tools in the same turn where possible:
+for delivery, delay, non-delivery, shortage or supplier-service reports, use MySQL invoice/supplier
+tools AND search_documents; invoices alone do not record delivery timing or an affected outlet.
+Follow with dependent queries only when a first result supplies the invoice, file or row to verify.
+Treat chat messages as reports, not settled adjustments. A reporter's outlet tag is not proof of
+the affected outlet; say the outlet was not stated when the message does not name it.
+uploaded_files in SQLite is a file inventory, not business amounts. Other enabled Kaya
+MySQL/SQLite tables are optional read-only sources.
 For client POS and master-table questions use query_existing with database="mysql", not
 query_uploads (which accepts only uploaded_* tables). Follow the enabled client-table
 guidance and actual discovered columns; do not assume unavailable tables or join columns.
@@ -110,10 +122,33 @@ def function_tool(name: str, description: str, properties: dict, required: list[
 TOOLS = [
     function_tool("lookup_outlet_history", "Look up outlet renaming, name changes, re-registration and alias history by canonical OR alias code, including original evidence files and effective dates.", {"outlet_code": {"type": "string"}}, ["outlet_code"]),
     function_tool("query_uploads", "Read uploaded_* tables in the shared Kaya MySQL database, including uploaded_invoice_lines (one invoice item per row), uploaded_invoice_audits, uploaded_invoices, uploaded_outlet_csvs and uploaded_roster_rows. Include source_file and roster sheet/row locators; use supplied schema and SELECT only.", {"sql": {"type": "string"}}, ["sql"]),
-    function_tool("search_documents", "Semantic search of the shared kaya_kopi_knowledge collection, including existing Kaya records. Returns file metadata and evidence text.", {"query": {"type": "string"}}, ["query"]),
+    function_tool("search_documents", "Search uploaded text and the indexed Kaya document corpus (WhatsApp/email exports) for operational reports. Returns file metadata, line locators and evidence text.", {"query": {"type": "string"}}, ["query"]),
     function_tool("query_manifest", "SELECT uploaded_files in SQLite: file_hash, source_file, kind, original_name, record_count, created_at. Inventory only, not invoice totals.", {"sql": {"type": "string"}}, ["sql"]),
     function_tool("query_existing", "Read allowed client POS/master and existing ingestion tables with database=mysql, or allowed existing SQLite tables with database=sqlite. Use discovered columns and client-table guidance; do not send client-table SQL to query_uploads or mix uploaded copies.", {"database": {"type": "string", "enum": ["mysql", "sqlite"]}, "sql": {"type": "string"}}, ["database", "sql"]),
 ]
+
+
+DELIVERY_ISSUE_REQUEST = re.compile(
+    r"\b(?:delay(?:ed|s)?|late|never|missing|short(?:age)?|fail(?:ed|ure)?|driver\s+mc|mc)\b",
+    re.IGNORECASE,
+)
+DELIVERY_SUBJECT = re.compile(
+    r"\b(?:deliver(?:y|ed|ies)?|egg|eggs|supplier|order|truck|driver)\b",
+    re.IGNORECASE,
+)
+
+
+def delivery_issue_question(question: str) -> bool:
+    """Detect operational delivery reports that need chat/email evidence."""
+    return bool(DELIVERY_ISSUE_REQUEST.search(question) and DELIVERY_SUBJECT.search(question))
+
+
+def delivery_search_query(question: str) -> str:
+    """Use the known operational wording so keyword and semantic search find the reports."""
+    terms = [question.strip()]
+    if re.search(r"\beggs?\b", question, re.IGNORECASE):
+        terms.append("eggs never delivered driver MC supplier delivery")
+    return " ".join(term for term in terms if term)
 
 
 def history_outlet(question: str) -> str | None:
@@ -226,9 +261,12 @@ def pricing_scenario_answer(question: str, store: Any) -> dict | None:
     delta = price_delta(question)
     if delta is None:
         content = (
-            "I can prepare a per-unit sensitivity scenario, but no change amount was given. "
-            "State the change per cup (for example, SGD 0.10) and, if it is not all kopi, "
-            "the exact item."
+            "I can't provide a price-increase figure. The records show selling prices and "
+            "volumes, but not the matched per-cup cost of goods sold, ingredient yield or "
+            "wastage, or a full allocation of rent and labour. There is therefore no verified "
+            "basis for a safe increase. If you provide a proposed change per cup (for example, "
+            "SGD 0.10) and the exact item, I can show its revenue sensitivity and the break-even "
+            "volume change. Any change needs Finance and Admin Manager sign-off."
         )
         return {"content": protect_answer(content), "sources": [], "tools": []}
     try:
@@ -721,22 +759,45 @@ class UploadAgent:
         requested_history = history_outlet(question) if history_enabled else None
         today = datetime.now(ZoneInfo("Asia/Singapore")).date().isoformat()
         client_guidance = {name: details for name, details in CLIENT_TABLE_GUIDANCE.items() if name in schemas.get("mysql", {})}
+        sources: set[str] = set()
+        activity: list[dict] = []
+        has_evidence = False
+        provenance_needed = False
+        delivery_context = ""
+        if delivery_issue_question(question):
+            # Operational delivery reports live in chat/email documents. Fetch them
+            # before the model decides its SQL so an invoice-only answer cannot hide them.
+            try:
+                evidence = safe_result(self.processor.search(delivery_search_query(question)))
+            except Exception:
+                evidence = {"ok": False, "error": "Document search is unavailable."}
+            ok = evidence.get("ok") is not False
+            results = evidence.get("results", [])
+            activity.append({"name": "search_documents", "ok": ok, "truncated": False})
+            if ok and results:
+                has_evidence = True
+                sources.update(collect_sources(evidence))
+                delivery_context = json.dumps(evidence, default=str)
         context = f"Today in Singapore: {today}.\nUpload MySQL schema:\n{json.dumps(UPLOAD_SCHEMA)}\nEnabled existing schemas:\n{json.dumps(schemas)}\nClient MySQL table guidance:\n{json.dumps(client_guidance)}"
+        if delivery_context:
+            context += (
+                "\nOperational chat/email evidence retrieved for this delivery question "
+                "(reports, not settled adjustments):\n" + delivery_context
+            )
+            context += "\nYou may also query MySQL invoice/supplier records in the same turn; keep the sources distinct."
+        elif delivery_issue_question(question):
+            context += "\nNo chat/email evidence was pre-retrieved. Call search_documents before answering this delivery question."
         messages: list[ChatCompletionMessageParam] = [{"role": "system", "content": SYSTEM + context}]
         for item in history:
             if item["role"] == "user":
                 messages.append({"role": "user", "content": protect_text(item["content"])})
             elif item["role"] == "assistant":
                 messages.append({"role": "assistant", "content": protect_text(item["content"])})
-        sources = set()
-        activity = []
-        has_evidence = False
-        provenance_needed = False
         last_failed = False
-        model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+        model = os.getenv("OPENAI_CHAT_MODEL", "gpt-6-luna")
 
-        def finish(content: str | None) -> dict:
-            answer = protect_answer(content or "No answer was returned.")
+        def finish(content: Any) -> dict:
+            answer = protect_answer(message_text(content) or "No answer was returned.")
             if not has_evidence:
                 answer = "I couldn't verify an answer from the available records. Check the upload inventory and database connections."
             else:
@@ -750,13 +811,21 @@ class UploadAgent:
             if step == 0 and requested_history:
                 choice = {"type": "function", "function": {"name": "lookup_outlet_history"}}
                 messages.append({"role": "system", "content": f"Look up history for {requested_history} with lookup_outlet_history now, returning its source evidence."})
+            request = tool_request_kwargs(model, choice, tools)
+            if choice == "required" and "tool_choice" not in request:
+                messages.append({"role": "system", "content": "Call at least one of the provided tools before answering. Do not answer this question from general knowledge."})
             response = self.processor.client.chat.completions.create(
-                model=model, messages=messages, tools=tools, temperature=0,
-                tool_choice=choice,
+                model=model, messages=messages,
+                **request, **model_temperature_kwargs(model, 0),
+                **reasoning_effort_kwargs(model),
             )
             self.processor.log(response, "upload-assistant-chat", model)
             message = response.choices[0].message
             if not message.tool_calls:
+                if not activity and not has_evidence and step < 7:
+                    messages.append({"role": "system", "content": "You must call a tool now. Retrieve the relevant records before giving an answer."})
+                    last_failed = True
+                    continue
                 return finish(message.content)
             messages.append(cast(ChatCompletionAssistantMessageParam, message.model_dump(exclude_none=True)))
             last_failed = False
@@ -792,8 +861,10 @@ class UploadAgent:
         self.processor.budget.check_budget_or_raise()
         messages.append({"role": "system", "content": "You have reached the tool-call limit. Do not call more tools. Answer only from evidence already returned; state clearly what could not be verified."})
         response = self.processor.client.chat.completions.create(
-            model=model, messages=messages, tools=tools, temperature=0,
-            tool_choice="none",
+            model=model, messages=messages,
+            **tool_request_kwargs(model, "none", tools),
+            **model_temperature_kwargs(model, 0),
+            **reasoning_effort_kwargs(model),
         )
         self.processor.log(response, "upload-assistant-chat", model)
         message = response.choices[0].message

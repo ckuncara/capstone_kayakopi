@@ -21,7 +21,12 @@ from kaya_kopi.paths import project_root
 from kaya_kopi.repositories.chroma_store import SharedChromaRepository
 from kaya_kopi.repositories.sqlite_ops import SQLiteOpsRepository
 from kaya_kopi.security.budget_guard import BudgetGuard
-from kaya_kopi.security.openai_proxy import openai_client_options, openai_configured
+from kaya_kopi.security.openai_proxy import (
+    model_temperature_kwargs,
+    openai_client_options,
+    openai_configured,
+    reasoning_effort_kwargs,
+)
 from kaya_kopi.security.supabase_auth import ensure_cli_sign_in
 
 
@@ -56,7 +61,8 @@ def ocr_other_image(
     budget.check_budget_or_raise()
     response = ChatOpenAI(
         model=cfg.ocr_model,
-        temperature=0.0,
+        **model_temperature_kwargs(cfg.ocr_model, 0.0),
+        **reasoning_effort_kwargs(cfg.ocr_model),
         **openai_client_options(cfg, "ocr"),
     ).invoke(
         [

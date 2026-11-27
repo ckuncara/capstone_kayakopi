@@ -5,13 +5,15 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from decimal import Decimal
 from datetime import date
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
+from langchain_openai.chat_models.base import OpenAIInvalidRequestError
 from streamlit.testing.v1 import AppTest
 
 from kaya_kopi.copilot import chat_backend
@@ -254,6 +256,34 @@ def test_singapore_relative_calendar_period_bounds_are_exact_and_injectable():
     assert "last quarter: 2026-07-01 through 2026-09-30" in prompt
 
 
+def test_system_prompt_combines_response_contract_and_project_guardrails():
+    prompt = chat_backend.SYSTEM_PROMPT
+
+    assert "## Tool capabilities and evidence limits" in prompt
+    assert "## Evidence and reasoning" in prompt
+    assert "## Response composition" in prompt
+    assert (
+        '{"finding":"direct answer","key_evidence":[],"limitations":[],"recommendation":null}'
+        in prompt
+    )
+    assert "item-level purchase totals" in prompt
+    assert 'analysis="spend"' in prompt
+    assert "uploaded_* tables" in prompt
+    assert "source_uri and source_locator" in prompt
+    assert "Never set it to a" in prompt
+    assert "price recommendation, business decision, legal advice, or tax advice" in prompt
+
+
+def test_query_business_data_only_mode_keeps_response_contract(monkeypatch):
+    monkeypatch.setenv("KAYA_QUERY_BUSINESS_DATA_ONLY", "1")
+
+    prompt = chat_backend._current_system_message(today=date(2026, 11, 25)).content
+
+    assert "query_business_data_sql`: the only MySQL/SQL tool" in prompt
+    assert "## Response composition" in prompt
+    assert '"finding":"direct answer"' in prompt
+
+
 def test_current_system_message_includes_current_turn_period_conflict():
     results = [
         {
@@ -328,6 +358,207 @@ def test_refused_question_does_not_construct_or_call_chatbot(monkeypatch, questi
     get_chatbot.assert_not_called()
 
 
+def test_safe_ai_message_normalises_block_content():
+    message = AIMessage(content=[
+        {"type": "text", "text": "Our suppliers are A and B."},
+    ])
+
+    safe = chat_backend._safe_ai_message(message, [])
+
+    assert safe.content == "Our suppliers are A and B."
+
+
+def test_delivery_issue_question_detects_operational_reports():
+    assert chat_backend.delivery_issue_question("any eggs delivery delayed in any outlet?")
+    assert chat_backend.delivery_issue_question("eggs never arrive, driver MC")
+    assert not chat_backend.delivery_issue_question("how much teh did we purchase in 2025?")
+
+
+def test_delivery_system_message_requires_document_search():
+    message = chat_backend._current_system_message(
+        question="any eggs delivery delayed in any outlet?"
+    )
+
+    assert "search_documents_sql" in message.content
+    assert "invoices alone" in message.content
+
+
+def test_delivery_question_prefetches_chat_evidence(tmp_path, monkeypatch):
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = AIMessage(content="Yes, chat reports show egg delivery problems.")
+    search = Mock()
+    search.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "source_type": "whatsapp_message",
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+            "source_locator": "lines=47-47",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        result = chat_backend.get_chatbot().invoke(
+            {"messages": [HumanMessage(content="any eggs delivery delayed in any outlet?")]},
+            {"configurable": {"thread_id": "delivery-test"}},
+        )
+    finally:
+        chat_backend.get_chatbot.cache_clear()
+
+    assert search.invoke.call_count == 1
+    sent = model.invoke.call_args.args[0]
+    assert any(
+        "Operational chat/email evidence retrieved" in str(message.content)
+        for message in sent
+    )
+    assert "chat reports show egg delivery problems" in result["messages"][-1].content
+    assert any(
+        isinstance(message, SystemMessage)
+        and "Operational chat/email evidence retrieved" in str(message.content)
+        for message in result["messages"]
+    )
+
+
+def test_tool_call_turn_does_not_print_a_placeholder_answer():
+    tool_turn = AIMessage(
+        content=[{"type": "text", "text": ""}],
+        tool_calls=[{"name": "get_data_coverage_sql", "args": {}, "id": "1"}],
+    )
+    final_turn = AIMessage(content=[{"type": "text", "text": ""}])
+
+    assert chat_backend._safe_ai_message(tool_turn, []).content == ""
+    assert chat_backend._safe_ai_message(final_turn, []).content == "No answer was returned."
+
+
+def test_price_scenario_detection_and_amount():
+    question = (
+        "Show a S$0.10 kopi price scenario and the public recipe assumptions. "
+        "What can and cannot be concluded?"
+    )
+
+    assert chat_backend.price_scenario_question(question)
+    assert chat_backend.price_scenario_amount(question) == Decimal("0.10")
+    assert not chat_backend.price_scenario_question(
+        "How much can we increase the Teh price to improve margin?"
+    )
+
+
+def test_price_scenario_prefetches_numbers_and_missing_recipe_note(tmp_path, monkeypatch):
+    question = (
+        "Show a S$0.10 kopi price scenario and the public recipe assumptions. "
+        "What can and cannot be concluded?"
+    )
+    scenario = Mock()
+    scenario.invoke = Mock(return_value={
+        "ok": True,
+        "status": "PARTIAL",
+        "observed_partial_pos": {
+            "units": "1100", "gross_sales_sgd": "2034.40",
+            "minimum_observed_price_sgd": "1.60", "maximum_observed_price_sgd": "2.16",
+        },
+        "gross_price_increase_sgd": "0.10",
+        "scenarios": [{
+            "demand_change_percent": "0", "projected_units": "1100.00",
+            "projected_gross_sales_sgd": "2144.40",
+            "incremental_gross_sales_sgd": "110.00",
+            "incremental_ex_gst_sales_sgd": "100.92",
+        }],
+        "missing_for_decision": ["recipe-level ingredient cost per cup"],
+        "citation": [{"source_uri": "data/sql/kayakopi_pos.sql"}],
+    })
+    recipe = Mock()
+    recipe.invoke = Mock(return_value={"ok": True, "results": []})
+    monkeypatch.setattr(kaya, "assess_kopi_price_change_sql", scenario)
+    monkeypatch.setattr(kaya, "search_documents_sql", recipe)
+
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.return_value = AIMessage(content="At unchanged volume, +SGD 110.00 gross sales.")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    try:
+        result = chat_backend.get_chatbot().invoke(
+            {"messages": [HumanMessage(content=question)]},
+            {"configurable": {"thread_id": "scenario-test"}},
+        )
+    finally:
+        chat_backend.get_chatbot.cache_clear()
+
+    assert scenario.invoke.call_count == 1
+    assert recipe.invoke.call_count == 1
+    sent = model.invoke.call_args.args[0]
+    context = " ".join(str(message.content) for message in sent)
+    assert "2144.40" in context
+    assert "110.00" in context
+    assert "No indexed recipe card" in context
+    assert result["messages"][-1].content == "At unchanged volume, +SGD 110.00 gross sales."
+
+
+def test_custom_chat_model_is_sent_to_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    graph = Mock()
+    graph.stream.return_value = iter([{"chat": {"messages": [AIMessage(content="ok")]}}])
+    get_chatbot = Mock(return_value=graph)
+    monkeypatch.setattr(chat_backend, "get_chatbot", get_chatbot)
+
+    result = list(chat_backend.stream_chat(
+        "thread", "how much teh we purchase in 2025?"
+    ))
+
+    assert result[-1][0].content == "ok"
+    get_chatbot.assert_called_once()
+
+
+def test_get_chatbot_builds_gpt6_with_compatible_options(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_OPENAI_MODEL", "gpt-6-luna")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    constructor = Mock(return_value=model)
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", constructor)
+    chat_backend.get_chatbot.cache_clear()
+    graph = None
+    try:
+        graph = chat_backend.get_chatbot()
+        kwargs = constructor.call_args.kwargs
+        assert kwargs["model"] == "gpt-6-luna"
+        assert "temperature" not in kwargs
+        assert kwargs["reasoning_effort"] == "none"
+    finally:
+        if graph is not None:
+            graph.checkpointer.conn.close()
+        chat_backend.get_chatbot.cache_clear()
+
+
+def test_invalid_request_error_names_configured_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("KAYA_OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    graph = Mock()
+    graph.stream.side_effect = OpenAIInvalidRequestError(
+        "invalid model", response=Mock(), body=None,
+    )
+    get_chatbot = Mock(return_value=graph)
+    monkeypatch.setattr(chat_backend, "get_chatbot", get_chatbot)
+
+    result = list(chat_backend.stream_chat("thread", "how much teh?"))
+
+    content = result[-1][0].content
+    assert "gpt-4o-mini" in content
+    assert "provider rejected" in content
+    get_chatbot.assert_called_once()
+
+
 def test_tool_evidence_and_answer_are_protected_before_checkpoint(tmp_path, monkeypatch):
     @tool
     def search_example() -> dict:
@@ -337,6 +568,7 @@ def test_tool_evidence_and_answer_are_protected_before_checkpoint(tmp_path, monk
             "message": "Alex reported the machine. Contact +65 9123 4567.",
             "staff_name": "Alex",
             "hourly_rate_sgd": "15",
+            "employee_salary": 2000,
         }
 
     model = Mock()
@@ -359,6 +591,7 @@ def test_tool_evidence_and_answer_are_protected_before_checkpoint(tmp_path, monk
         tool_message = next(message for message in result["messages"] if isinstance(message, ToolMessage))
         assert "9123 4567" not in tool_message.content
         assert '"hourly_rate_sgd": "[REDACTED]"' in tool_message.content
+        assert '"employee_salary": "[REDACTED]"' in tool_message.content
         assert "$15" not in result["messages"][-1].content
         assert "Finance and Admin Manager" in result["messages"][-1].content
         state = graph.get_state({"configurable": {"thread_id": "test"}})
@@ -554,7 +787,7 @@ def test_direct_answer_from_supplied_context_is_not_blocked_by_reviewer(tmp_path
         chat_backend.get_chatbot.cache_clear()
 
 
-def test_result_without_citation_can_be_used(tmp_path, monkeypatch):
+def test_answer_without_source_metadata_is_allowed(tmp_path, monkeypatch):
     @tool
     def lookup_total() -> str:
         """Return a known total."""
@@ -577,6 +810,7 @@ def test_result_without_citation_can_be_used(tmp_path, monkeypatch):
             {"configurable": {"thread_id": "test"}},
         )
         assert result["messages"][-1].content == "The total is 42."
+        assert "Sources:" not in result["messages"][-1].content
     finally:
         chat_backend.get_chatbot.cache_clear()
 
@@ -651,7 +885,7 @@ def test_supplier_lookup_preserves_business_address_in_chat_and_history(tmp_path
     monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
     monkeypatch.setattr(chat_backend, "ALL_TOOLS", [kaya.get_supplier_addresses_sql])
     chat_backend.get_chatbot.cache_clear()
-    graph = chat_backend.get_chatbot()
+    graph = chat_backend.get_chatbot(None)
     try:
         result = graph.invoke(
             {"messages": [HumanMessage(content="What is Example Pte Ltd's supplier address?")]},
@@ -715,7 +949,9 @@ def test_headcount_answer_is_displayed(tmp_path, monkeypatch):
         app = AppTest.from_file(str(app_path), default_timeout=30).run()
         app.chat_input[0].set_value("How many Baristas in JUR-01?").run()
         assert not app.exception
-        assert app.session_state["message_history"][-1]["content"] == answer
+        displayed = app.session_state["message_history"][-1]["content"]
+        assert answer in displayed
+        assert any("example-roster.xlsx" in item.value for item in app.caption)
         repository.analyze_outlets.assert_called_once_with(
             "headcount", ["JUR-01"], None, None, None,
         )
@@ -733,6 +969,91 @@ def test_other_tools_cannot_enable_supplier_address_exception():
     protected = chat_backend._safe_tool_message(message)
     assert "123 Orchard Road" not in protected.content
     assert chat_backend._supplier_addresses([protected]) == []
+
+
+def test_tool_call_does_not_stream_unverified_intermediate_content(tmp_path, monkeypatch):
+    @tool
+    def evidence() -> dict:
+        """Return synthetic evidence."""
+        return {"citation": "example.txt", "total": 42}
+
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = [
+        AIMessage(content="Unverified total: 999.", tool_calls=[
+            {"name": "evidence", "args": {}, "id": "1"},
+        ]),
+        AIMessage(content="The total is 42."),
+    ]
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [evidence])
+    chat_backend.get_chatbot.cache_clear()
+    graph = chat_backend.get_chatbot(None)
+    try:
+        messages = list(chat_backend.stream_chat("test", "What is the total?"))
+        assert all("999" not in str(message.content) for message, _ in messages)
+        final_answer = next(
+            message.content for message, _ in reversed(messages)
+            if isinstance(message, AIMessage) and not message.tool_calls
+        )
+        tool_result = next(
+            message.content for message, _ in messages if isinstance(message, ToolMessage)
+        )
+        assert final_answer == "The total is 42."
+        assert "example.txt" in str(tool_result)
+    finally:
+        graph.checkpointer.conn.close()
+        chat_backend.get_chatbot.cache_clear()
+
+
+def test_reopening_older_history_skips_tool_call_text_and_keeps_report(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [])
+    chat_backend.get_chatbot.cache_clear()
+    graph = chat_backend.get_chatbot()
+    try:
+        graph.update_state(
+            {"configurable": {"thread_id": "older-chat"}},
+            {"messages": [
+                HumanMessage(content="What is the total?"),
+                AIMessage(content="Unverified total: 999.", tool_calls=[
+                    {"name": "lookup", "args": {}, "id": "1"},
+                ]),
+                ToolMessage(
+                    content="42", name="lookup", tool_call_id="1",
+                    artifact={
+                        "result_type": "business_data", "columns": ["total"],
+                        "rows": [{"total": 42}], "retrieved_record_count": 1,
+                    },
+                ),
+                AIMessage(content="The total is 42."),
+                HumanMessage(content="Show the details."),
+                AIMessage(content=json.dumps({
+                    "finding": {"phone": "+65 9123 4567"},
+                    "key_evidence": [], "limitations": [], "recommendation": None,
+                })),
+            ]},
+        )
+        app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=30).run()
+        app.button(key="older-chat").click().run()
+        assert not app.exception
+        history = app.session_state["message_history"]
+        assert [item["content"] for item in history] == [
+            "What is the total?", "The total is 42.", "Show the details.",
+            "The model returned an invalid answer format.",
+        ]
+        assert history[1]["structured_results"][0]["rows"] == [{"total": 42}]
+    finally:
+        graph.checkpointer.conn.close()
+        chat_backend.get_chatbot.cache_clear()
 
 
 @tool
@@ -768,7 +1089,7 @@ class ChatBackendTest(unittest.TestCase):
              patch.dict(os.environ, {"OPENAI_API_KEY": "test", "KAYA_CHAT_DB": f"{directory}/chat.sqlite3"}), \
              patch.object(chat_backend, "ChatOpenAI", return_value=model), \
              patch.object(chat_backend, "ALL_TOOLS", []):
-            graph = chat_backend.get_chatbot()
+            graph = chat_backend.get_chatbot(None)
             try:
                 for thread_id in ("first", "second"):
                     graph.invoke({"messages": [HumanMessage(content="Hi")]},
@@ -783,7 +1104,7 @@ class ChatBackendTest(unittest.TestCase):
                 graph.checkpointer.conn.close()
                 chat_backend.get_chatbot.cache_clear()
 
-            reopened_graph = chat_backend.get_chatbot()
+            reopened_graph = chat_backend.get_chatbot(None)
             try:
                 self.assertEqual(chat_backend.get_thread_names(), {"first": "Supplier review"})
 
@@ -929,4 +1250,49 @@ def test_answer_usage_footer_sums_tool_calls_and_survives_reopening(tmp_path, mo
         assert expected in [caption.value for caption in app.caption]
         assert model.invoke.call_count == 2
     finally:
+        chat_backend.get_chatbot.cache_clear()
+
+
+def test_direct_mysql_sources_are_saved_and_rendered(tmp_path, monkeypatch):
+    source = "data/tabular/daily_summary_AMK-01.csv"
+    note = "Cite the returned data paths as Markdown file links."
+
+    @tool("query_mysql_direct")
+    def direct_example(sql: str) -> dict:
+        """Return synthetic direct MySQL evidence."""
+        return {
+            "ok": True,
+            "rows": [{"source_file": source}],
+            "citations": [source],
+            "citation_note": note,
+        }
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("KAYA_CHAT_DB", str(tmp_path / "chat.sqlite3"))
+    monkeypatch.setenv("LOCAL_SQLITE_PATH", str(tmp_path / "usage.sqlite3"))
+    model = Mock()
+    model.bind_tools.return_value = model
+    model.invoke.side_effect = [
+        AIMessage(content="", tool_calls=[{
+            "name": "query_mysql_direct", "args": {"sql": "SELECT * FROM daily_outlet_summary"},
+            "id": "direct",
+        }]),
+        AIMessage(content=f"Observed source: {source}."),
+    ]
+    monkeypatch.setattr(chat_backend, "ChatOpenAI", Mock(return_value=model))
+    monkeypatch.setattr(chat_backend, "ALL_TOOLS", [direct_example])
+    chat_backend.get_chatbot.cache_clear()
+    graph = chat_backend.get_chatbot()
+    try:
+        app_path = Path(__file__).resolve().parents[2] / "src/kaya_kopi/copilot/streamlit_app.py"
+        app = AppTest.from_file(str(app_path), default_timeout=30).run()
+        app.chat_input[0].set_value("Show the daily summary source.").run()
+        assert not app.exception
+        saved = app.session_state["message_history"][-1]
+        assert saved["sources"] == [source]
+        assert saved["source_note"] == note
+        assert "Source Files" in [caption.value for caption in app.caption]
+        assert source in [caption.value for caption in app.caption]
+    finally:
+        graph.checkpointer.conn.close()
         chat_backend.get_chatbot.cache_clear()

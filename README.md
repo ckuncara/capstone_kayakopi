@@ -20,7 +20,7 @@ cp .env.example .env
 ./scripts/start.sh
 ```
 
-Open <http://localhost:8501> (or the configured `KAYA_STREAMLIT_HOST_PORT`). Docker images provide
+Open [http://localhost:8501](http://localhost:8501) (or the configured `KAYA_STREAMLIT_HOST_PORT`). Docker images provide
 the isolated Python environments; no host virtual environment or manual `pip install` is required.
 
 The commands have deliberately separate responsibilities:
@@ -43,14 +43,67 @@ docker compose down             # stop services; preserve database volumes
 ```
 
 The deterministic test command does not call the LLM. To manually review the non-deterministic
-answers against the project acceptance questions after loading the database, run:
+answers after loading the database, run the Ops Copilot or Upload Desk acceptance scenario set:
 
 ```bash
-docker compose --profile test run --rm -e PYTHONPATH=/workspace/src test python -m scripts.run_llm_acceptance
+# Ops Copilot: 31 scenarios
+docker compose --profile test run --rm test python -m scripts.run_llm_acceptance
+
+# Upload Desk: 32 scenarios, including tool traces and source files
+docker compose --profile test run --rm test python -m scripts.run_upload_acceptance
 ```
 
-This uses the configured OpenAI key and prints each answer beside its expected evidence checklist;
-it is intentionally not part of the automated test suite.
+Both runners accept `--model NAME`, `--all-latest-models`, `--case N` (repeatable) and
+`--list-models`. The latest GPT-6 variants are:
+
+```text
+gpt-6.2-astra  gpt-6.2-sol  gpt-6.1-terra  gpt-6.1-sol
+gpt-6-astra    gpt-6-sol    gpt-6-luna
+```
+
+The spend meter shows the rate card for the configured model, and usage logging uses the same
+per-model rate. Each listed model has its own entry in `MODEL_PRICING`, so a business rate change
+can be applied to one model without affecting the others. The current rates are the **Standard,
+short-context** values from [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
+(checked 2026-11-26); Batch/Fast/Flex/Ultrafast and long-context rates are not used by default.
+
+For example, to check only scenarios 1, 10 and 11 with one model:
+
+```bash
+docker compose --profile test run --rm test python -m scripts.run_upload_acceptance \
+  --model gpt-6.2-astra --case 1 --case 10 --case 11
+```
+
+The runners use the configured OpenAI-compatible endpoint/key and print each answer beside its
+expected evidence checklist; they are intentionally not part of the automated test suite.
+
+### Guardrail and demo evaluation
+
+Run the offline evaluation without an LLM or the shared database:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_guardrail_eval.py -q
+```
+
+Its 22 questions use fictional tool results and a mocked model. They check the guarded chat
+path, expected answer patterns, output privacy checks and deterministic refusals, not the real
+model's reasoning or the accuracy of the real data. Source citations remain in the structured
+report UI when tools return them; an absent citation does not by itself block an answer.
+The live checks require specific details rather than just topic keywords, but remain pattern
+checks: they can miss errors or reject a differently worded correct answer.
+
+To check the real application path and configured data, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.run_guardrail_eval
+```
+
+**This live command calls the configured model and tools, incurs API costs,** and may access the
+configured data and usage tracking. Run it only with team permission and appropriate data access.
+It uses temporary chat and chat-usage databases, reports pass/fail without printing answers, and
+returns a nonzero exit code on failure. Its simple checks are not a substitute for reviewing the
+actual demo answers, source conflicts and privacy. Re-run after significant changes and retain
+the latest output for the team. See `docs/guardrail_eval_results.md` for the recorded offline run.
 
 ### Remembered sign-in
 
@@ -144,5 +197,6 @@ outside the package.
 Briefing Mon 16 Nov (Zoom) · **Checkpoint 1 Fri 20 Nov, 17:00 (repo review; no meeting)** · Checkpoint 2 Mon 23 Nov · Consults Mon 23 and Tue 24 Nov (Zoom) · Final sprint Thu 26 Nov · **Demo Fri 27 Nov 09:00–13:00, SR902** (slot order announced Tue 24 Nov). Details: [CHECKPOINTS.md](CHECKPOINTS.md).
 
 ## Real commit
+
 - Chandra
 - Andri

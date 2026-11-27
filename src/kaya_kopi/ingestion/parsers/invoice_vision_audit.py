@@ -4,7 +4,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from kaya_kopi.config import AppConfig
-from kaya_kopi.security.openai_proxy import openai_client_options
+from kaya_kopi.security.openai_proxy import (
+    model_temperature_kwargs,
+    openai_client_options,
+    reasoning_effort_kwargs,
+)
 from kaya_kopi.security.budget_guard import BudgetGuard
 
 TOLERANCE = 0.02
@@ -41,7 +45,7 @@ class InvoiceOCRResult(BaseModel):
 def extract_invoice_with_openai(
     file_bytes: bytes,
     mime_type: str = "image/jpeg",
-    ocr_model: str = "gpt-4o-mini",
+    ocr_model: str = "gpt-6-luna",
     api_key: str | None = None,
     budget_guard: BudgetGuard | None = None,
     branch_code: str | None = "HQ",
@@ -50,13 +54,14 @@ def extract_invoice_with_openai(
     if budget_guard:
         budget_guard.check_budget_or_raise()
 
-    model_used = ocr_model or "gpt-4o-mini"
+    model_used = ocr_model or "gpt-6-luna"
     b64_img = base64.b64encode(file_bytes).decode("utf-8")
 
     cfg = AppConfig(api_key=api_key or "")
     llm = ChatOpenAI(
         model=model_used,
-        temperature=0.0,
+        **model_temperature_kwargs(model_used, 0.0),
+        **reasoning_effort_kwargs(model_used),
         **openai_client_options(cfg, "ocr", api_key=api_key),
     ).with_structured_output(InvoiceOCRResult, include_raw=True)
 

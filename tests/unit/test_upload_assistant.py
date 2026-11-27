@@ -10,16 +10,33 @@ from unittest.mock import MagicMock, Mock, patch
 from PIL import Image
 from openpyxl import Workbook
 
-from kaya_kopi.upload_assistant.storage import CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, Settings, UploadStore, citation_path, collect_sources, select_sql
+from kaya_kopi.copilot.tools import kaya
+from kaya_kopi.upload_assistant.storage import (
+    CSV_SOURCE_COLUMNS, ROSTER_SOURCE_COLUMNS, UPLOAD_SCHEMA, UPLOAD_TABLES,
+    Settings, UploadStore, citation_path, collect_sources, schema_privilege_denied,
+    select_sql,
+)
 from kaya_kopi.upload_assistant.invoice_audit import audit_invoice
 from kaya_kopi.upload_assistant.agent import (
-    UploadAgent, dedupe_manager_refusals, history_outlet, parse_period,
-    price_delta, pricing_question, safe_result, uploaded_item_question,
+    SYSTEM, UploadAgent, dedupe_manager_refusals, delivery_issue_question,
+    delivery_search_query, history_outlet, parse_period,
+    price_delta, pricing_question, pricing_scenario_answer, safe_result,
+    uploaded_item_question,
     uploaded_purchase_answer, with_source_warning,
 )
+from kaya_kopi.upload_assistant import ingestion as upload_ingestion
 from kaya_kopi.upload_assistant.ingestion import InvoiceExtraction, RosterBatch, RosterRow, UploadProcessor, parse_outlet_csv, roster_sheets, roster_source_fields
 from kaya_kopi.config import AppConfig
 from kaya_kopi.security.budget_guard import BudgetGuard
+
+
+def test_openai_client_honors_custom_base_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example/v1/")
+
+    client = upload_ingestion.openai_client()
+
+    assert str(client.base_url).rstrip("/") == "https://llm.example/v1"
 
 
 def test_archive_manifest_and_sources_use_data_type_folders(tmp_path, monkeypatch):
@@ -475,6 +492,64 @@ def test_roster_column_migration_is_idempotent(tmp_path, monkeypatch):
     assert not any("ALTER TABLE" in call.args[0] for call in cursor.execute.call_args_list)
 
 
+@pytest.mark.parametrize("code, message", [
+    (1044, "Access denied for user 'restricted_user' to database 'kayakopi'"),
+    (1142, "CREATE command denied to user 'restricted_user' for table 'uploaded_invoices'"),
+    (1143, "SELECT command denied to user 'restricted_user' for table 'uploaded_invoices'"),
+])
+def test_schema_privilege_denied_ignores_bad_credentials_and_outages(code, message):
+    assert schema_privilege_denied(pymysql.OperationalError(code, message))
+    assert not schema_privilege_denied(pymysql.OperationalError(2003, "Can't connect to MySQL server"))
+    assert not schema_privilege_denied(
+        pymysql.OperationalError(1045, "Access denied for user 'restricted_user' (using password: YES)")
+    )
+
+
+def test_init_mysql_uses_existing_tables_when_ddl_privileges_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+    repository = MagicMock()
+    store.repository = Mock(return_value=repository)
+    cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args):
+        if sql.startswith("CREATE TABLE"):
+            raise pymysql.OperationalError(1142, "CREATE command denied")
+        if sql == "SHOW TABLES":
+            cursor.fetchall.return_value = [
+                {"Tables_in_kayakopi": name} for name in UPLOAD_TABLES
+            ]
+        return None
+
+    cursor.execute.side_effect = execute
+
+    store.init_mysql()
+
+    statements = [call.args[0] for call in cursor.execute.call_args_list]
+    assert statements.count("SHOW TABLES") == 1
+    assert not any(sql.startswith("ALTER TABLE") for sql in statements)
+
+
+def test_init_mysql_reports_missing_tables_when_ddl_privileges_are_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
+    store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
+    repository = MagicMock()
+    store.repository = Mock(return_value=repository)
+    cursor = repository._connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
+
+    def execute(sql, *args):
+        if sql.startswith("CREATE TABLE"):
+            raise pymysql.OperationalError(1142, "CREATE command denied")
+        if sql == "SHOW TABLES":
+            cursor.fetchall.return_value = []
+        return None
+
+    cursor.execute.side_effect = execute
+
+    with pytest.raises(RuntimeError, match="uploaded_invoices"):
+        store.init_mysql()
+
+
 def test_init_mysql_backfills_legacy_invoice_line_json(tmp_path, monkeypatch):
     monkeypatch.setenv("KAYA_PROJECT_ROOT", str(tmp_path))
     store = UploadStore(Settings(tmp_path / "data" / "upload_assistant"))
@@ -523,6 +598,94 @@ def model_message(content="", calls=None):
 
 def tool_call(name, sql, identifier):
     return SimpleNamespace(id=identifier, type="function", function=SimpleNamespace(name=name, arguments=json.dumps({"sql": sql})))
+
+
+def test_delivery_question_detection_and_search_query():
+    assert delivery_issue_question("any eggs delivery delayed in any outlet?")
+    assert delivery_issue_question("eggs never arrive, called Ban Seng, driver MC")
+    assert not delivery_issue_question("how much teh did we purchase in 2025?")
+    assert "driver MC" in delivery_search_query("any eggs delivery delayed in any outlet?")
+
+
+def test_search_merges_indexed_whatsapp_documents(processor, monkeypatch):
+    collection = Mock()
+    collection.count.return_value = 0
+    processor.collection = Mock(return_value=collection)
+    search_sql = Mock()
+    search_sql.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_type": "whatsapp_message",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+            "source_locator": "lines=47-47",
+            "citation": "data/docs/whatsapp_exports/ops_chat_export.txt#lines=47-47",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search_sql)
+
+    result = processor.search("eggs never delivered driver MC")
+
+    assert result["ok"] is True
+    assert result["results"][0]["source_type"] == "whatsapp_message"
+    assert result["results"][0]["citation"].endswith("lines=47-47")
+
+
+def test_search_keeps_document_evidence_when_embeddings_fail(processor, monkeypatch):
+    processor.collection = Mock(side_effect=RuntimeError("embedding service unavailable"))
+    search_sql = Mock()
+    search_sql.invoke = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_type": "whatsapp_message",
+            "source_uri": "data/docs/whatsapp_exports/ops_chat_export.txt",
+        }],
+    })
+    monkeypatch.setattr(kaya, "search_documents_sql", search_sql)
+
+    result = processor.search("eggs never delivered driver MC")
+
+    assert result["results"][0]["source_type"] == "whatsapp_message"
+    assert "Uploaded-document embeddings could not be searched." in result["errors"]
+
+
+def test_system_prompt_uses_parallel_independent_tools_then_dependent_followups():
+    assert "Call independent tools in the same turn" in SYSTEM
+    assert "search_documents" in SYSTEM
+    assert "reporter's outlet tag" in SYSTEM
+
+
+def test_delivery_answer_prefetches_chat_evidence_before_invoice_tools(processor, tmp_path):
+    source = "data/docs/whatsapp_exports/ops_chat_export.txt"
+    source_file = tmp_path / source
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text("eggs today never deliver leh, called Ban Seng they say driver MC")
+    processor.search = Mock(return_value={
+        "ok": True,
+        "results": [{
+            "source_type": "whatsapp_message",
+            "chunk_text": "eggs today never deliver leh, called Ban Seng they say driver MC",
+            "source_file": source,
+            "source_uri": source,
+        }],
+    })
+    processor.store.query = Mock(return_value={"ok": True, "rows": []})
+    processor.client.chat.completions.create.side_effect = [
+        model_message(calls=[tool_call("query_uploads", "SELECT * FROM uploaded_invoices", "invoices")]),
+        model_message("Yes, chat reports show egg delivery problems; the affected outlet was not stated."),
+    ]
+    agent = UploadAgent(processor)
+    agent.existing_schema = Mock(return_value={})
+
+    result = agent.ask([{"role": "user", "content": "any eggs delivery delayed in any outlet?"}])
+
+    assert processor.search.call_count == 1
+    assert result["tools"][0] == {"name": "search_documents", "ok": True, "truncated": False}
+    assert source in result["sources"]
+    assert "delivery problems" in result["content"]
+    system_message = processor.client.chat.completions.create.call_args_list[0].kwargs["messages"][0]["content"]
+    assert "Operational chat/email evidence retrieved" in system_message
 
 
 def test_chat_fetches_provenance_after_aggregate_and_returns_structured_sources(processor):
@@ -581,6 +744,16 @@ def test_margin_questions_explain_missing_inputs_without_tool_loop(processor, qu
 def test_price_delta_and_pricing_question_detect_per_cup_changes(question):
     assert price_delta(question) == Decimal("0.10")
     assert pricing_question(question)
+
+
+def test_price_increase_question_explains_missing_cost_evidence():
+    answer = pricing_scenario_answer(
+        "how much we can increase the price for Teh/Tea?", object()
+    )
+
+    assert "can't provide a price-increase figure" in answer["content"]
+    assert "no verified basis for a safe increase" in answer["content"]
+    assert "proposed change per cup" in answer["content"]
 
 
 def test_pricing_question_returns_per_unit_sensitivity(processor, monkeypatch):
@@ -742,7 +915,7 @@ def test_step_limit_falls_back_to_answer_from_existing_evidence(processor):
     assert processor.client.chat.completions.create.call_args_list[-1].kwargs["tool_choice"] == "none"
 
 
-@pytest.mark.parametrize("configured,expected", [("gpt-4o", "gpt-4o"), (None, "gpt-4o-mini")])
+@pytest.mark.parametrize("configured,expected", [("gpt-4o", "gpt-4o"), (None, "gpt-6-luna")])
 def test_chat_uses_only_openai_chat_model(processor, monkeypatch, configured, expected):
     monkeypatch.setenv("UPLOAD_AI_CHAT_MODEL", "unused-legacy-model")
     if configured is None:
@@ -755,6 +928,21 @@ def test_chat_uses_only_openai_chat_model(processor, monkeypatch, configured, ex
     agent.ask([{"role": "user", "content": "Check invoice records"}])
     assert processor.client.chat.completions.create.call_args.kwargs["model"] == expected
     assert processor.log.call_args.args[2] == expected
+
+
+def test_gpt_6_luna_chat_calls_omit_temperature(processor, monkeypatch):
+    monkeypatch.setenv("OPENAI_CHAT_MODEL", "gpt-6-luna")
+    processor.client.chat.completions.create.return_value = model_message("No verified data.")
+    agent = UploadAgent(processor)
+    agent.existing_schema = Mock(return_value={})
+
+    agent.ask([{"role": "user", "content": "Check invoice records"}])
+
+    calls = processor.client.chat.completions.create.call_args_list
+    for call in calls:
+        assert "temperature" not in call.kwargs
+        assert "tool_choice" not in call.kwargs
+        assert call.kwargs["reasoning_effort"] == "none"
 
 
 def usage_response(input_tokens, output_tokens):
